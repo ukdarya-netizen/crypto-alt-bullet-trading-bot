@@ -864,6 +864,32 @@ export const GetJournalVstPositionsResponse = zod.object({
 
 
 /**
+ * Owner-only, read-only ledger rows for statistics and charts. No exchange read and no orders.
+ * @summary Closed VST positions as compact performance rows
+ */
+export const GetJournalVstPerformanceResponse = zod.object({
+  "generatedAt": zod.coerce.date(),
+  "leverage": zod.number().int().describe('Fixed VST isolated leverage used for margin and ROE.'),
+  "trades": zod.array(zod.object({
+  "sourceSignalId": zod.string(),
+  "symbol": zod.string(),
+  "patternId": zod.string().nullable(),
+  "entryAt": zod.coerce.date().nullable(),
+  "closedAt": zod.coerce.date(),
+  "entryPrice": zod.number().nullable(),
+  "closePrice": zod.number().nullable(),
+  "quantity": zod.number().nullable(),
+  "marginUsdt": zod.number().nullable().describe('Entry notional / leverage.'),
+  "pnlUsdt": zod.number().nullable().describe('Realised result after the stored commissions; null when the ledger cannot prove it.'),
+  "roePercent": zod.number().nullable(),
+  "closeReason": zod.string().nullable(),
+  "manual": zod.boolean(),
+  "accounting": zod.enum(['exchange_fills', 'exchange_history', 'unknown'])
+}))
+})
+
+
+/**
  * Owner-only ledger snapshot of positions moved to the terminal error status by an unresolved close abandon. Not a fresh BingX exchange read.
  * @summary List VST positions stuck in ambiguous close review
  */

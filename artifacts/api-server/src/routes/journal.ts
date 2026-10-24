@@ -11,6 +11,7 @@ import {
   GetJournalAccessResponse,
   GetJournalBotResponse,
   GetJournalVstPositionsResponse,
+  GetJournalVstPerformanceResponse,
   GetJournalVstReviewResponse,
   ResolveJournalVstReviewMarginTopUpKeepOpenParams,
   ResolveJournalVstReviewMarginTopUpKeepOpenBody,
@@ -49,6 +50,7 @@ import { createJournalVstReviewClosedHandler } from "./journal-vst-review-close-
 import { createJournalVstReviewPreRunnerHandler } from "./journal-vst-review-pre-runner-handler";
 import { createJournalVstReviewOpenHandler } from "./journal-vst-review-open-handler";
 import { vstPositionPriceAudit } from "../bullet-bot/vst-price-audit.mjs";
+import { vstPerformanceRow } from "../lib/vst-performance";
 // @ts-expect-error The read-only BingX credential probe is JavaScript.
 import { probeBingXConnection } from "../bullet-bot/bingx-connection.mjs";
 // @ts-expect-error The read-only live preflight is JavaScript.
@@ -374,6 +376,26 @@ router.get("/journal/vst-positions", async (_req, res): Promise<void> => {
       snapshot: record(position.snapshot),
       updatedAt: new Date(position.updatedAt).toISOString(),
     })),
+  }));
+});
+
+// Read-only statistics source for the overview page: every closed VST
+// position as one compact row. Ledger only, no exchange calls.
+router.get("/journal/vst-performance", async (_req, res): Promise<void> => {
+  res.setHeader("Cache-Control", "no-store");
+  const result = await dbPool.query(
+    `SELECT p.source_signal_id, p.symbol, p.snapshot, p.updated_at,
+            s.body->>'patternId' AS pattern_id
+     FROM vst_positions p
+     LEFT JOIN vst_signals s ON s.source_signal_id = p.source_signal_id
+     WHERE p.status = 'closed'
+     ORDER BY p.updated_at DESC, p.source_signal_id DESC
+     LIMIT 5000`,
+  );
+  res.json(GetJournalVstPerformanceResponse.parse({
+    generatedAt: new Date().toISOString(),
+    leverage: 10,
+    trades: result.rows.map(vstPerformanceRow),
   }));
 });
 

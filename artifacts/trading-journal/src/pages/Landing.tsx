@@ -1,16 +1,11 @@
 import { Link } from "wouter";
+import { BrandLockup, BrandMark } from "@/components/brand";
 
 export default function Landing() {
   return (
     <div className="cyber-landing min-h-[100dvh] bg-background flex flex-col">
       <header className="cyber-landing-header border-b border-border px-5 py-4 sm:px-8 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="cyber-landing-mark" aria-hidden="true"><span /></div>
-          <div>
-            <span className="block font-bold text-sm sm:text-lg tracking-[.12em] uppercase">CAB / JNL</span>
-            <span className="hidden sm:block font-mono text-[9px] tracking-[.18em] text-muted-foreground">CRYPTO ALT BULLET</span>
-          </div>
-        </div>
+        <BrandLockup />
         <div className="flex items-center gap-4">
           <Link href="/sign-in" className="cyber-landing-login text-sm font-medium transition-colors">
             Войти
@@ -42,7 +37,7 @@ export default function Landing() {
           </div>
           <div className="cyber-landing-console" aria-label="Приватный торговый журнал">
             <div className="cyber-console-top"><span>JOURNAL CONSOLE</span><i>OWNER ONLY</i></div>
-            <div className="cyber-console-orbit"><span className="cyber-orbit-core">CAB</span></div>
+            <div className="cyber-console-orbit"><BrandMark className="size-24 border-primary/30" /></div>
             <div className="cyber-console-line"><span>MODE</span><strong>PAPER-FIRST</strong></div>
             <div className="cyber-console-line"><span>ACCESS</span><strong className="text-primary">PRIVATE</strong></div>
             <div className="cyber-console-line"><span>EXECUTION</span><strong className="text-amber-300">BLOCKED</strong></div>

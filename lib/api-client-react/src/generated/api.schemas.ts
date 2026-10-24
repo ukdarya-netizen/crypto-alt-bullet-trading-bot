@@ -900,6 +900,54 @@ export interface JournalVstPositions {
   recentClosedPositions: JournalVstPositionsRecentClosedPositionsItem[];
 }
 
+export type JournalVstPerformanceTradeAccounting = typeof JournalVstPerformanceTradeAccounting[keyof typeof JournalVstPerformanceTradeAccounting];
+
+
+export const JournalVstPerformanceTradeAccounting = {
+  exchange_fills: 'exchange_fills',
+  exchange_history: 'exchange_history',
+  unknown: 'unknown',
+} as const;
+
+export interface JournalVstPerformanceTrade {
+  sourceSignalId: string;
+  symbol: string;
+  /** @nullable */
+  patternId: string | null;
+  /** @nullable */
+  entryAt: string | null;
+  closedAt: string;
+  /** @nullable */
+  entryPrice: number | null;
+  /** @nullable */
+  closePrice: number | null;
+  /** @nullable */
+  quantity: number | null;
+  /**
+     * Entry notional / leverage.
+     * @nullable
+     */
+  marginUsdt: number | null;
+  /**
+     * Realised result after the stored commissions; null when the ledger cannot prove it.
+     * @nullable
+     */
+  pnlUsdt: number | null;
+  /** @nullable */
+  roePercent: number | null;
+  /** @nullable */
+  closeReason: string | null;
+  manual: boolean;
+  accounting: JournalVstPerformanceTradeAccounting;
+}
+
+export interface JournalVstPerformance {
+  generatedAt: string;
+  /** Fixed VST isolated leverage used for margin and ROE. */
+  leverage: number;
+  trades: JournalVstPerformanceTrade[];
+}
+
 export type JournalVstReviewPositionsPositionsItem = {
   sourceSignalId: string;
   symbol: string;

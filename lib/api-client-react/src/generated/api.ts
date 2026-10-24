@@ -40,6 +40,7 @@ import type {
   JournalTrade,
   JournalTradeList,
   JournalVstEntryQueue,
+  JournalVstPerformance,
   JournalVstPositions,
   JournalVstReviewCloseNowResult,
   JournalVstReviewConfirmOpenNowResult,
@@ -1868,6 +1869,84 @@ export function useGetJournalVstPositions<TData = Awaited<ReturnType<typeof getJ
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetJournalVstPositionsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetJournalVstPerformanceUrl = () => {
+
+
+
+
+  return `/api/journal/vst-performance`
+}
+
+/**
+ * Owner-only, read-only ledger rows for statistics and charts. No exchange read and no orders.
+ * @summary Closed VST positions as compact performance rows
+ */
+export const getJournalVstPerformance = async ( options?: Parameters<typeof customFetch>[1]): Promise<JournalVstPerformance> => {
+
+  return customFetch<JournalVstPerformance>(getGetJournalVstPerformanceUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetJournalVstPerformanceQueryKey = () => {
+    return [
+    `/api/journal/vst-performance`
+    ] as const;
+    }
+
+
+export const getGetJournalVstPerformanceQueryOptions = <TData = Awaited<ReturnType<typeof getJournalVstPerformance>>, TError = ErrorType<void>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getJournalVstPerformance>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetJournalVstPerformanceQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getJournalVstPerformance>>> = ({ signal }) => getJournalVstPerformance({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getJournalVstPerformance>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetJournalVstPerformanceQueryResult = NonNullable<Awaited<ReturnType<typeof getJournalVstPerformance>>>
+export type GetJournalVstPerformanceQueryError = ErrorType<void>
+
+
+/**
+ * @summary Closed VST positions as compact performance rows
+ */
+
+export function useGetJournalVstPerformance<TData = Awaited<ReturnType<typeof getJournalVstPerformance>>, TError = ErrorType<void>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getJournalVstPerformance>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetJournalVstPerformanceQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

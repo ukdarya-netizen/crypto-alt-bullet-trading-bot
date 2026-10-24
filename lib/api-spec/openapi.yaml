@@ -476,6 +476,23 @@ paths:
           description: Sign-in required
         "403":
           description: Not the configured owner
+  /journal/vst-performance:
+    get:
+      operationId: getJournalVstPerformance
+      tags: [journal]
+      summary: Closed VST positions as compact performance rows
+      description: Owner-only, read-only ledger rows for statistics and charts. No exchange read and no orders.
+      responses:
+        "200":
+          description: Closed VST positions, newest first, with realised result where it is known
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstPerformance"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
   /journal/vst-review:
     get:
       operationId: getJournalVstReview
@@ -1345,6 +1362,34 @@ components:
                 additionalProperties: true
                 description: "Raw stored position snapshot, including closeFill/lastCloseFill and manualResolution when present. Never re-derived."
               updatedAt: { type: string, format: date-time }
+    JournalVstPerformance:
+      type: object
+      required: [generatedAt, leverage, trades]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        leverage: { type: integer, description: "Fixed VST isolated leverage used for margin and ROE." }
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalVstPerformanceTrade"
+    JournalVstPerformanceTrade:
+      type: object
+      required: [sourceSignalId, symbol, patternId, entryAt, closedAt, entryPrice, closePrice, quantity, marginUsdt, pnlUsdt, roePercent, closeReason, manual, accounting]
+      properties:
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        patternId: { type: ["string", "null"] }
+        entryAt: { type: ["string", "null"], format: date-time }
+        closedAt: { type: string, format: date-time }
+        entryPrice: { type: ["number", "null"] }
+        closePrice: { type: ["number", "null"] }
+        quantity: { type: ["number", "null"] }
+        marginUsdt: { type: ["number", "null"], description: "Entry notional / leverage." }
+        pnlUsdt: { type: ["number", "null"], description: "Realised result after the stored commissions; null when the ledger cannot prove it." }
+        roePercent: { type: ["number", "null"] }
+        closeReason: { type: ["string", "null"] }
+        manual: { type: boolean }
+        accounting: { type: string, enum: [exchange_fills, exchange_history, unknown] }
     JournalVstReviewPositions:
       type: object
       required: [positions, marginTopUpPending, legacyPreRunnerCloseIntents, legacyPreRunnerCloseHistory]
