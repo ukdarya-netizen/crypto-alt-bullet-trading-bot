@@ -54,6 +54,26 @@ in a source file. Keep `PAPER_ONLY_SIGNAL=true` (or leave unset) and never set
 `EXECUTION_MODE=live`. Run offline tests with
 `node --test artifacts/api-server/src/bullet-bot/test/*.test.mjs`.
 
+### Offline mixed VST load regression
+
+Run `node --test artifacts/api-server/src/bullet-bot/test/vst-mixed-load.test.mjs`
+from the workspace root. This uses production native adapters, the broker,
+source snapshot reader, worker and outbound pacer with injected local transport,
+dummy credentials, an in-memory ledger and a controlled clock. It never starts
+the application/worker service or contacts an exchange.
+
+The scenarios combine entry bursts, stop replacement (including its final
+exact-ID cancellation guard), source-triggered closes, history reads and
+two-pass fill-archive capture. They assert shared 1100ms request spacing,
+bounded protective-action waits, 429 retry/exhaustion/write cooldowns,
+signal/quote expiry and no replay of ambiguous POSTs, including after a fresh
+worker/broker/client is constructed from the saved intent.
+
+Source HTTP itself is a separate service, not a BingX request; only exchange
+operations caused by a source snapshot consume the shared exchange slots.
+These are deterministic adapter regressions, not a venue throughput benchmark
+or authorization to submit VST/mainnet orders.
+
 Routes:
 
 - `POST /api/trading/signals` — the existing Bullet sender URL, now handled by
