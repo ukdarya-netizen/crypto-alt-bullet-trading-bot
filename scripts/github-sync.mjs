@@ -50,27 +50,84 @@ export function planSync(base, local, remote) {
 export class SourceSync {
   constructor({ root = process.cwd(), stateDir, remote = DEFAULT_REMOTE, branch = "main" } = {}) {
     this.root = path.resolve(root);
-    this.stateDir = stateDir ?? path.join(this.root, ".local/github-sync");
-    this.repo = path.join(this.stateDir, "repository");
+    this.stateDir = path.resolve(stateDir ?? path.join(this.root, ".local/github-sync"));
+    // No nested .git directory: workspace restoration can remove it. Every
+    // mirror command below names its own metadata explicitly, never searches
+    // upwards for the workspace's checkpoint repository.
+    this.repo = path.join(this.stateDir, "source-tree");
+    this.gitDir = path.join(this.stateDir, "source-metadata");
     this.stateFile = path.join(this.stateDir, "baseline.json");
     this.remote = remote;
     this.branch = branch;
     fs.mkdirSync(this.stateDir, { recursive: true });
   }
   git(cwd, args, input) {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+    const environment = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+      "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE",
+      "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT"]) delete environment[key];
+    const options = ["-c", "core.hooksPath=/dev/null"];
+    if (path.resolve(cwd) === this.repo) {
+      this.assertMirror();
+      options.push(`--git-dir=${this.gitDir}`, `--work-tree=${this.repo}`);
+    }
+    return execFileSync("git", [...options, ...args], {
       cwd, input, timeout: 60000, maxBuffer: 64 * 1024 * 1024,
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: environment,
     });
   }
-  ensureRepo() {
-    if (!fs.existsSync(path.join(this.repo, ".git"))) {
-      this.git(this.root, ["clone", "--no-checkout", "--", this.remote, this.repo]);
+  assertStatePaths() {
+    if (fs.realpathSync(this.stateDir) !== this.stateDir) {
+      throw new Error("Source sync state directory must not use symlinks");
     }
+    for (const directory of [this.repo, this.gitDir]) {
+      try {
+        const stat = fs.lstatSync(directory);
+        if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Unsafe source mirror directory");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  assertMirror() {
+    this.assertStatePaths();
+    for (const name of ["HEAD", "config", "objects"]) {
+      const target = path.join(this.gitDir, name);
+      let stat;
+      try { stat = fs.lstatSync(target); }
+      catch { throw new Error("Missing isolated mirror metadata; retry will recover from GitHub"); }
+      if (stat.isSymbolicLink() || (name === "objects" ? !stat.isDirectory() : !stat.isFile())) {
+        throw new Error("Unsafe isolated mirror metadata");
+      }
+    }
+    for (const target of [path.join(this.repo, ".git"),
+      path.join(this.gitDir, "commondir"), path.join(this.gitDir, "objects/info/alternates")]) {
+      try {
+        fs.lstatSync(target);
+        throw new Error("Source mirror must not redirect to another Git repository");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+    }
+  }
+  ensureRepo() {
+    this.assertStatePaths();
+    fs.mkdirSync(this.repo, { recursive: true });
+    if (!fs.existsSync(this.gitDir)) {
+      const staging = path.join(this.stateDir, `bootstrap-${crypto.randomUUID()}`);
+      try {
+        this.git(this.root, ["clone", "--bare", "--no-local", "--", this.remote, staging]);
+        fs.renameSync(staging, this.gitDir);
+      } finally {
+        fs.rmSync(staging, { recursive: true, force: true });
+      }
+    }
+    this.assertMirror();
     const actual = this.git(this.repo, ["remote", "get-url", "origin"]).toString().trim();
     if (actual !== this.remote) throw new Error("Source mirror remote mismatch");
-    this.git(this.repo, ["fetch", "--quiet", "origin", this.branch]);
+    this.git(this.repo, ["fetch", "--quiet", "origin",
+      `+refs/heads/${this.branch}:refs/remotes/origin/${this.branch}`]);
   }
   remoteSnapshot(ref) {
     const records = this.git(this.repo, ["ls-tree", "-rz", ref]).toString().split("\0").filter(Boolean);
@@ -182,6 +239,7 @@ export class SourceSync {
       }
       // Only this disposable mirror is reset, never the workspace Git history.
       this.git(this.repo, ["reset", "--hard", ref]);
+      this.git(this.repo, ["clean", "-fdx"]);
       for (const name of plan.uploads) this.writeEntry(this.repo, name, local.get(name));
       this.git(this.repo, ["add", "-A"]);
       if (this.git(this.repo, ["status", "--porcelain"]).length) {

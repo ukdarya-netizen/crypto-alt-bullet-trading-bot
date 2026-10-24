@@ -153,3 +153,77 @@ test("concurrent GitHub commit rejects the push without overwriting either works
   assert.equal(f.git(f.upstream, "show", "main:one.txt"), "local change");
   assert.equal(fs.readFileSync(path.join(f.local, "two.txt"), "utf8"), "concurrent remote change\n");
 });
+
+test("missing mirror metadata recovers without resetting the baseline or publishing private history", async (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.local, "one.txt"), "first local change\n");
+  await f.sync.tick({ quietMs: 0 });
+  const baselineBefore = fs.readFileSync(f.sync.stateFile, "utf8");
+  fs.mkdirSync(path.join(f.local, ".agents"));
+  fs.writeFileSync(path.join(f.local, ".agents/private.txt"), "private checkpoint\n");
+  f.git(f.local, "add", ".");
+  f.git(f.local, "commit", "-m", "private workspace checkpoint");
+  const privateHead = f.git(f.local, "rev-parse", "HEAD");
+  // Model restoration losing Git metadata but retaining checkout and state.
+  fs.rmSync(f.sync.gitDir, { recursive: true, force: true });
+  assert.throws(() => f.sync.git(f.sync.repo, ["reset", "--hard", "HEAD"]), /Missing isolated/);
+  assert.equal(f.git(f.local, "rev-parse", "HEAD"), privateHead);
+  assert.equal(fs.readFileSync(f.sync.stateFile, "utf8"), baselineBefore);
+  f.git(f.other, "pull", "--ff-only");
+  f.remoteEdit("two.txt", "remote change after restoration\n");
+  fs.writeFileSync(path.join(f.local, "one.txt"), "second local change\n");
+  const restored = new SourceSync({ root: f.local, remote: f.upstream });
+  await restored.tick({ quietMs: 0 });
+  assert.equal(f.status().state, "synced");
+  assert.equal(f.git(f.local, "rev-parse", "HEAD"), privateHead);
+  assert.equal(f.git(f.upstream, "show", "main:one.txt"), "second local change");
+  assert.equal(fs.readFileSync(path.join(f.local, "two.txt"), "utf8"), "remote change after restoration\n");
+  assert.throws(() => f.git(f.upstream, "cat-file", "-e", privateHead));
+  assert.equal(fs.existsSync(path.join(restored.repo, ".git")), false);
+  assert.equal(restored.git(restored.repo, ["rev-parse", "--absolute-git-dir"]).toString().trim(), restored.gitDir);
+});
+
+test("loss of metadata mid-cycle fails closed before any push or workspace import", async (t) => {
+  const f = fixture(t);
+  const head = f.git(f.local, "rev-parse", "HEAD");
+  const remoteHead = f.git(f.upstream, "rev-parse", "main");
+  fs.writeFileSync(path.join(f.local, "one.txt"), "unpublished local edit\n");
+  const originalGit = f.sync.git.bind(f.sync);
+  f.sync.git = (cwd, args, input) => {
+    if (args[0] === "reset") fs.rmSync(f.sync.gitDir, { recursive: true, force: true });
+    return originalGit(cwd, args, input);
+  };
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /Missing isolated/);
+  assert.equal(f.git(f.local, "rev-parse", "HEAD"), head);
+  assert.equal(f.git(f.upstream, "rev-parse", "main"), remoteHead);
+  assert.equal(fs.readFileSync(path.join(f.local, "one.txt"), "utf8"), "unpublished local edit\n");
+});
+
+test("rejects metadata symlinks and wrong remotes without touching the parent repository", async (t) => {
+  const f = fixture(t);
+  const head = f.git(f.local, "rev-parse", "HEAD");
+  fs.rmSync(f.sync.gitDir, { recursive: true, force: true });
+  fs.symlinkSync(path.join(f.local, ".git"), f.sync.gitDir);
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /Unsafe source mirror/);
+  assert.equal(f.git(f.local, "rev-parse", "HEAD"), head);
+  fs.rmSync(f.sync.gitDir);
+  f.sync.ensureRepo();
+  f.sync.git(f.sync.repo, ["remote", "set-url", "origin", f.other]);
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /remote mismatch/);
+});
+
+test("recovery retains conflicts and does not upload abandoned checkout files", async (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.sync.repo, "abandoned.txt"), "untracked mirror file\n");
+  fs.rmSync(f.sync.gitDir, { recursive: true, force: true });
+  fs.writeFileSync(path.join(f.local, "one.txt"), "local version\n");
+  f.remoteEdit("one.txt", "remote version\n");
+  await f.sync.tick({ quietMs: 0 });
+  assert.equal(f.status().state, "conflict");
+  fs.writeFileSync(path.join(f.local, "one.txt"), "remote version\n");
+  fs.writeFileSync(path.join(f.local, "new.txt"), "reviewed local addition\n");
+  await f.sync.tick({ quietMs: 0 });
+  assert.equal(f.status().state, "synced");
+  assert.throws(() => f.git(f.upstream, "show", "main:abandoned.txt"));
+  assert.equal(f.git(f.upstream, "show", "main:new.txt"), "reviewed local addition");
+});

@@ -11,6 +11,11 @@ and this workflow are running, not as part of the published trading application.
 
 - A separate mirror under `.local/github-sync` preserves GitHub's clean source
   history. The workspace's checkpoint history is never pushed or rewritten.
+  Mirror metadata is stored separately from the disposable checkout; every Git
+  command explicitly selects it and cannot fall back to the parent repository.
+  If metadata disappears, the next cycle rebuilds it from GitHub while retaining
+  the three-way baseline, pending edits and conflict checks. A wrong remote,
+  redirected metadata or partially corrupted metadata stops the exchange.
 - Local and remote changes to different files can be exchanged in one cycle.
   Different changes to the same file, including edit/delete conflicts, pause
   the whole exchange. No side wins automatically.
