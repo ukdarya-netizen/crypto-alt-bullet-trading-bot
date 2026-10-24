@@ -1,4 +1,4 @@
-import { isTradablePatternId } from "./pattern-eligibility.mjs";
+import { isTradablePatternId, isSupportedSourceLadder } from "./pattern-eligibility.mjs";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const PAPER_EXIT_POLICY_VERSION = "owner_25_25_50_v1";
@@ -395,14 +395,7 @@ function validateRules(patternId, symbol, rules) {
     ) {
       throw new TypeError("Unsupported BTC exit ladder");
     }
-  } else if (
-    rules.firstTargetPct !== 10 ||
-    rules.breakevenAtPct !== 5 ||
-    rules.protectedProfitAtPct !== 10 ||
-    rules.protectedProfitPct !== 5 ||
-    rules.trailingActivationPct !== 15 ||
-    rules.trailingGapPercentagePoints !== 10
-  ) {
+  } else if (!isSupportedSourceLadder(rules)) {
     throw new TypeError("Unsupported non-BTC exit ladder");
   }
 

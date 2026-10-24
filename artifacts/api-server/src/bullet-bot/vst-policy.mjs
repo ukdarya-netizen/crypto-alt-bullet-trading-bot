@@ -4,7 +4,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const SIGNAL_MAX_AGE_MS = 10 * 60 * 1000;
 const MAX_FUTURE_SIGNAL_MS = 30 * 1000;
-import { isTradablePatternId } from "./pattern-eligibility.mjs";
+import { isTradablePatternId, isSupportedSourceLadder } from "./pattern-eligibility.mjs";
 
 export const VST_POLICY_THRESHOLDS = Object.freeze({
   ordinary: Object.freeze({
@@ -98,12 +98,7 @@ function validateRules(signal) {
         rules.trailingGapPercentagePoints !== 10) {
       throw new TypeError("Unsupported BTC VST exit ladder");
     }
-  } else if (rules.firstTargetPct !== 10 ||
-      rules.breakevenAtPct !== 5 ||
-      rules.protectedProfitAtPct !== 10 ||
-      rules.protectedProfitPct !== 5 ||
-      rules.trailingActivationPct !== 15 ||
-      rules.trailingGapPercentagePoints !== 10) {
+  } else if (!isSupportedSourceLadder(rules)) {
     throw new TypeError("Unsupported non-BTC VST exit ladder");
   }
 

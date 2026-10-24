@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import { isTradablePatternId } from "./pattern-eligibility.mjs";
+import { isTradablePatternId, isSupportedSourceLadder } from "./pattern-eligibility.mjs";
 export const SIGNAL_TTL_MS = 10 * 60_000;
 
 const obj = (x) => x !== null && typeof x === "object" && !Array.isArray(x);
@@ -91,12 +91,7 @@ export function validateSignal(s, now = Date.now()) {
       r.trailingGapPercentagePoints === 1 &&
       r.progressMilestoneIntervalPct === 1 &&
       !Object.hasOwn(r, "runner")
-    : r.firstTargetPct === 10 &&
-      r.breakevenAtPct === 5 &&
-      r.protectedProfitAtPct === 10 &&
-      r.protectedProfitPct === 5 &&
-      r.trailingActivationPct === 15 &&
-      r.trailingGapPercentagePoints === 10;
+    : isSupportedSourceLadder(r);
   if (!ladder) return reject(422, "unsupported_ladder", "payload.exitRules");
   if (!btc && s.patternId === "impulse_buy") {
     const runner = r.runner;
