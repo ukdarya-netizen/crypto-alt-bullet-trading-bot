@@ -4948,7 +4948,8 @@ test("an entry intent with a definite exchange rejection is abandoned quickly, n
   assert.equal(store.data.status, "error");
 });
 
-test("a failed verification read does not erase proof that an entry was never submitted", async () => {
+for (const preSignReason of ["final_budget_exceeded", "final_pre_sign_pacing_expired"]) {
+test(`a failed verification read preserves no-POST proof: ${preSignReason}`, async () => {
   const store = memoryStore(null);
   const clientOrderId = "entry-no-post-read-unavailable";
   store.data.intents.push({
@@ -4962,7 +4963,7 @@ test("a failed verification read does not erase proof that an entry was never su
     state: "unknown",
     outcome: {
       definiteRejection: true,
-      preSignReason: "final_budget_exceeded",
+      preSignReason,
       error: "BingXLiveApiError",
       errorMessage: "BingX final pre-sign check failed",
     },
@@ -4991,11 +4992,12 @@ test("a failed verification read does not erase proof that an entry was never su
   const intent = store.data.intents.find((row) => row.clientOrderId === clientOrderId);
   assert.equal(intent.state, "unknown");
   assert.equal(intent.outcome.definiteRejection, true);
-  assert.equal(intent.outcome.preSignReason, "final_budget_exceeded");
+  assert.equal(intent.outcome.preSignReason, preSignReason);
   await worker.runOnce();
   assert.equal(intent.state, "failed");
   assert.equal(intent.outcome.reason, "entry_abandoned_confirmed_flat_account");
 });
+}
 
 test("an ambiguous (non-rejected) stuck entry intent still waits the full timeout even when very recent", async () => {
   const store = memoryStore(null);

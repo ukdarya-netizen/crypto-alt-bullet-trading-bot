@@ -5,6 +5,7 @@ import { createStopTransferJournal } from "../stop-transfer-journal.mjs";
 import {
   createBingXLiveApi,
   createBingXOutboundPacer,
+  isDefiniteExchangeRejection,
   VST_AUTOMATED_LONG_POLICY,
   VST_BTC_HEDGE_LONG10_SHORT75_PROBE,
 } from "../bingx-live-api.mjs";
@@ -27,6 +28,55 @@ function freshEntryAttempt(extra = {}) {
     ...extra,
   };
 }
+
+test("a VST entry requests priority only after fresh checks and persists sizing before transport", async () => {
+  const slots = [];
+  let repriced = false;
+  const f = fixture({
+    symbol: "DOGE-USDT", dualSidePosition: true, longLeverage: 10, shortLeverage: 3,
+    requestPacer: {
+      deferFor() {},
+      async waitForSlot(options) {
+        slots.push(options);
+        if (options?.priority) assert.equal(repriced, true);
+      },
+    },
+  });
+  await f.api.placeVstAutomatedLong(freshEntryAttempt({
+    onReprice: async () => { repriced = true; },
+  }));
+  assert.equal(slots.filter(slot => slot?.priority).length, 1);
+  assert.equal(f.calls.filter(({ url, options }) =>
+    url.pathname === orderPath && options.method === "POST").length, 1);
+});
+
+test("pacing expiry is a proven no-transport refusal, with no POST or automatic resubmission", async () => {
+  const time = { now: 1700000000000 };
+  const f = fixture({
+    symbol: "DOGE-USDT", dualSidePosition: true, longLeverage: 10, shortLeverage: 3,
+    timeState: time,
+    requestPacer: {
+      deferFor() {},
+      async waitForSlot(options) {
+        if (options?.priority) time.now += 2001;
+      },
+    },
+  });
+  let transportCalls = 0;
+  const attempt = freshEntryAttempt({
+    onReprice: async () => {},
+    onTransportReady: async () => { transportCalls++; },
+  });
+  await assert.rejects(f.api.placeVstAutomatedLong(attempt), error => {
+    assert.equal(error.transportStage, "pre_transport");
+    assert.equal(error.preSignReason, "final_pre_sign_pacing_expired");
+    assert.equal(isDefiniteExchangeRejection(error), true);
+    return true;
+  });
+  assert.equal(transportCalls, 0);
+  assert.equal(f.calls.some(({ options }) => options.method === "POST"), false);
+  await assert.rejects(f.api.placeVstAutomatedLong(attempt), /already submitted/);
+});
 
 test("native fresh sizing shrinks quantity after drift, persists before POST, and keeps a single risk preflight", async () => {
   const f = fixture({

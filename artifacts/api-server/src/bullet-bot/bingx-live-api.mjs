@@ -49,6 +49,7 @@ const ALLOWED_VST_PRE_SIGN_REASONS = new Set([
   "final_quote_unavailable_or_stale",
   "final_quote_out_of_bounds",
   "final_sizing_persistence_failed",
+  "final_pre_sign_pacing_expired",
 ]);
 export const VST_BTC_HEDGE_LONG10_SHORT75_PROBE = "vst-btc-hedge-long10-short75";
 export const VST_AUTOMATED_LONG_POLICY = "vst-automated-long-1pct";
@@ -123,7 +124,8 @@ export function createBingXOutboundPacer({
 
   let nextRequestAt = 0;
   let logicalNow = 0;
-  let queue = Promise.resolve();
+  const pending = [];
+  let draining = false;
 
   const currentTime = () => {
     const now = Number(clock());
@@ -132,13 +134,11 @@ export function createBingXOutboundPacer({
     return logicalNow;
   };
 
-  async function waitForSlot() {
-    let release;
-    const previous = queue;
-    queue = new Promise((resolve) => { release = resolve; });
-    await previous;
+  async function drain() {
+    if (draining) return;
+    draining = true;
     try {
-      while (true) {
+      while (pending.length) {
         const now = currentTime();
         const slot = Math.max(now, nextRequestAt);
         if (slot > now) {
@@ -148,14 +148,29 @@ export function createBingXOutboundPacer({
         }
         const startedAt = currentTime();
         if (startedAt < nextRequestAt) continue;
-        // Reserve the next interval before releasing other queued clients;
-        // callers sign and begin transport immediately after this wait.
+        // Choose only when the slot is actually available. A mutation whose
+        // final checks just completed must not wait behind background reads.
+        // Never bypass the shared spacing or an exchange-imposed cooldown.
+        const priorityIndex = pending.findIndex(item => item.priority);
+        const [item] = pending.splice(priorityIndex < 0 ? 0 : priorityIndex, 1);
         nextRequestAt = currentTime() + gapMs;
-        return startedAt;
+        item.resolve(startedAt);
+        // Let the selected caller sign/start transport before advancing a
+        // fake clock or sleeping on behalf of the next queued request.
+        await Promise.resolve();
       }
+    } catch (error) {
+      for (const item of pending.splice(0)) item.reject(error);
     } finally {
-      release();
+      draining = false;
     }
+  }
+
+  function waitForSlot({ priority = false } = {}) {
+    return new Promise((resolve, reject) => {
+      pending.push({ resolve, reject, priority: priority === true });
+      void drain();
+    });
   }
 
   return Object.freeze({
@@ -945,14 +960,19 @@ export function createBingXLiveApi({
       let query;
       let signature;
       try {
-      await outboundPacer.waitForSlot();
+      await outboundPacer.waitForSlot({
+        priority: environment === "vst" && write && beforeSignCompletedAt !== undefined,
+      });
       if (environment === "vst" && beforeSignCompletedAt !== undefined) {
         const pacingDelay = Number(clock()) - beforeSignCompletedAt;
         if (!Number.isFinite(pacingDelay) || pacingDelay < 0 ||
             pacingDelay > VST_PRE_SIGN_MAX_PACING_DELAY_MS) {
           throw new BingXLiveApiError(
             "VST final pre-sign checks expired while waiting for request pacing",
-            { transportStage: "pre_transport" },
+            {
+              transportStage: "pre_transport",
+              preSignReason: "final_pre_sign_pacing_expired",
+            },
           );
         }
       }

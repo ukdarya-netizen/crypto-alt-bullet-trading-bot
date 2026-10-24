@@ -1910,6 +1910,23 @@ test("a synchronous exchange rejection on entry is tagged so callers can skip th
     },
   );
 
+  preSignApi.placeVstAutomatedLong = async () => {
+    throw new BingXLiveApiError(
+      "VST final pre-sign checks expired while waiting for request pacing",
+      { transportStage: "pre_transport", preSignReason: "final_pre_sign_pacing_expired" },
+    );
+  };
+  await assert.rejects(
+    preSignBroker.performIntent({
+      clientOrderId: "worker-eth-entry-pacing-expired", phase: "market-entry", request: base,
+    }),
+    error => {
+      assert.equal(error.definiteRejection, true);
+      assert.equal(error.preSignReason, "final_pre_sign_pacing_expired");
+      return true;
+    },
+  );
+
   // A genuinely ambiguous transport failure (no completed exchange response)
   // must NOT be tagged -- there is no proof the order was never accepted.
   const { api: networkFailureApi, broker: networkFailureBroker } = apiFixture({
@@ -7912,7 +7929,9 @@ test("both runner-fill readers accept paced history beyond two seconds and ancho
       event.finishedAt));
     assert.ok(finalPairStartedAt >= evidence.requestStartedAtMs,
       `${kind}: requestStartedAtMs anchors the final fresh account pair`);
-    assert.equal(finalPairCompletedAt - evidence.requestStartedAtMs, 2_200,
+    // Two 1100ms slots plus the last mock response's 5ms completion time.
+    // The pacer yields to the selected caller before advancing the next slot.
+    assert.equal(finalPairCompletedAt - evidence.requestStartedAtMs, 2_205,
       `${kind}: paced final account pair completion age`);
     assert.ok(finalPairCompletedAt - evidence.requestStartedAtMs <= 5_000,
       `${kind}: final account pair itself remains within the CAS age budget`);
@@ -7922,7 +7941,7 @@ test("both runner-fill readers accept paced history beyond two seconds and ancho
       `${kind}: every mocked exchange GET uses the real VST pacer gap`);
     assert.equal(fixture.requestStarts.length, 16,
       `${kind}: expected number of paced read calls`);
-    assert.equal(fixture.clockState.value - evidence.requestStartedAtMs, 2_200,
+    assert.equal(fixture.clockState.value - evidence.requestStartedAtMs, 2_205,
       `${kind}: normal paced completion is consumable by the worker/store 5s CAS`);
     assert.equal(fixture.calls.some(([name]) =>
       ["entry", "splitStop", "splitRaisePlace", "splitRaiseCancel",
