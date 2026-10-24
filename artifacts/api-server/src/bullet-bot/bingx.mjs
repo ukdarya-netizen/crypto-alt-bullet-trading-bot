@@ -4,11 +4,13 @@ const TIMEOUT_MS = 10_000;
 const CONTRACT_TTL_MS = 5 * 60_000;
 
 export class BingXApiError extends Error {
-  constructor(message, { httpStatus, code } = {}) {
+  constructor(message, { httpStatus, code, transient = false } = {}) {
     super(message);
     this.name = "BingXApiError";
     this.httpStatus = httpStatus;
     this.code = code;
+    // Network failure, timeout, 429 or 5xx: says nothing about the symbol.
+    this.transient = transient === true;
   }
 }
 
@@ -110,7 +112,7 @@ export function createBingX({
     nextRequestAt = slot + REQUEST_GAP_MS;
     if (slot > clock()) await sleep(slot - clock());
     const url = new URL(path, root);
-    url.searchParams.set("symbol", symbol);
+    if (symbol !== null) url.searchParams.set("symbol", symbol);
     for (const [key, value] of Object.entries(parameters)) {
       url.searchParams.set(key, String(value));
     }
@@ -119,18 +121,23 @@ export function createBingX({
     try {
       response = await fetchImpl(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
     } catch (error) {
-      throw new BingXApiError(`BingX public market request failed: ${error instanceof Error ? error.name : "network error"}`);
+      throw new BingXApiError(`BingX public market request failed: ${error instanceof Error ? error.name : "network error"}`,
+        { transient: true });
     }
     let payload;
     try {
       payload = await response.json();
     } catch {
-      throw new BingXApiError("BingX returned invalid JSON", { httpStatus: response.status });
+      throw new BingXApiError("BingX returned invalid JSON", {
+        httpStatus: response.status,
+        transient: response.status === 429 || response.status >= 500,
+      });
     }
     if (!response.ok || payload?.code !== 0) {
       throw new BingXApiError(
         `BingX public market request failed (HTTP ${response.status}, code ${String(payload?.code ?? "unknown")})`,
-        { httpStatus: response.status, code: payload?.code },
+        { httpStatus: response.status, code: payload?.code,
+          transient: response.status === 429 || response.status >= 500 },
       );
     }
     return payload.data;
@@ -180,6 +187,32 @@ export function createBingX({
       bid1Price: row.bidPrice == null ? null : String(row.bidPrice),
       quoteAt: row.closeTime == null ? null : new Date(Number(row.closeTime)).toISOString(),
     };
+  }
+
+  // One public request for every USDT perpetual quote (symbol omitted).
+  // Returns a Map keyed by the caller's symbols; a symbol missing from the
+  // bulk answer, or failing validation, is simply absent (caller falls back
+  // to the single-symbol ticker).
+  async function tickers(symbols) {
+    const wanted = new Map(symbols.map((symbol) => [exchangeSymbol(symbol), symbol]));
+    const rows = await request("/openApi/swap/v2/quote/ticker", null);
+    if (!Array.isArray(rows)) throw new BingXApiError("BingX returned no bulk ticker list");
+    const quotes = new Map();
+    for (const row of rows) {
+      const symbol = wanted.get(row?.symbol);
+      if (!symbol || !positiveNumber(row.lastPrice) || !positiveNumber(row.askPrice)) continue;
+      if (row.closeTime != null &&
+          (!Number.isFinite(Number(row.closeTime)) ||
+           Math.abs(clock() - Number(row.closeTime)) > 60_000)) continue;
+      quotes.set(symbol, {
+        symbol,
+        lastPrice: String(row.lastPrice),
+        ask1Price: String(row.askPrice),
+        bid1Price: row.bidPrice == null ? null : String(row.bidPrice),
+        quoteAt: row.closeTime == null ? null : new Date(Number(row.closeTime)).toISOString(),
+      });
+    }
+    return quotes;
   }
 
   async function premiumIndex(symbol) {
@@ -330,6 +363,7 @@ export function createBingX({
   return {
     instrument,
     ticker,
+    tickers,
     premiumIndex,
     fundingHistory,
     historicalKlines,

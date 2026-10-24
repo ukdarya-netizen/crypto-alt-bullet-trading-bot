@@ -107,7 +107,7 @@ function capabilityFixture({
   };
 }
 
-test("lookup support reuse never caches current account exposure or settings and expires", async () => {
+test("lookup support reuse never caches current account exposure and expires", async () => {
   const f = capabilityFixture();
   await f.broker.getCapabilities();
   const count = (name) => f.calls.filter((call) => call.name === name).length;
@@ -116,10 +116,12 @@ test("lookup support reuse never caches current account exposure or settings and
   await f.broker.getCapabilities();
   assert.equal(count("history"), 1);
   assert.equal(count("fills"), 1);
-  for (const name of ["balance", "positions", "openOrders",
-    "positionMode", "marginType", "leverage"]) {
+  for (const name of ["balance", "positions", "openOrders", "positionMode"]) {
     assert.equal(count(name), 2, `${name} must remain a new native read`);
   }
+  // Verified ISOLATED/10x symbol settings are memoized for 60 s in the probe.
+  assert.equal(count("marginType"), 1);
+  assert.equal(count("leverage"), 1);
   f.setNow(initialTime + 180_000);
   await f.broker.getCapabilities();
   assert.equal(count("history"), 2);
@@ -163,8 +165,8 @@ test("simultaneous identical capability reads coalesce only in flight and preser
   assert.equal(fixture.calls.filter(({ name }) => name === "positions").length, 2);
   assert.equal(fixture.calls.filter(({ name }) => name === "openOrders").length, 2);
   assert.equal(fixture.calls.filter(({ name }) => name === "balance").length, 2);
-  assert.equal(fixture.calls.length, 14,
-    "the later pass reuses protocol support only, not current account reads");
+  assert.equal(fixture.calls.length, 12,
+    "the later pass reuses protocol support and verified settings only, not account reads");
 });
 
 test("rejected in-flight reads are removed and never become a positive cache entry", async () => {
@@ -236,7 +238,7 @@ test("a genuinely delayed last-stage quote still fails the unchanged freshness l
       .map(({ startedAt }) => startedAt)));
 });
 
-test("every later capability assessment re-reads account exposure and missing stops fail closed", async () => {
+test("every later capability assessment re-reads account exposure and quarantines only the deviating symbol", async () => {
   const fixture = capabilityFixture();
   const flat = await fixture.broker.getCapabilities();
   assert.ok(flat.features.includes("atomic_protected_market_entry"));
@@ -246,8 +248,11 @@ test("every later capability assessment re-reads account exposure and missing st
     avgPrice: "100", positionId: "position-btc",
   }]);
   const missingStop = await fixture.broker.getCapabilities();
-  assert.ok(!missingStop.features.includes("atomic_protected_market_entry"));
-  assert.ok(!missingStop.features.includes("verified_exact_full_position_close"));
+  // One unprotected symbol no longer freezes the whole account: it is listed
+  // as unverified (the worker quarantines it) while other symbols proceed.
+  assert.ok(missingStop.features.includes("atomic_protected_market_entry"));
+  assert.deepEqual(missingStop.unverifiedSymbols, ["BTCUSDT"]);
+  assert.ok(!missingStop.features.includes("verified_exact_source_full_position_close"));
 
   fixture.setAccountState([
     { symbol: "BTC-USDT", positionSide: "LONG", positionAmt: "0.1",
@@ -256,8 +261,8 @@ test("every later capability assessment re-reads account exposure and missing st
       avgPrice: "2000", positionId: "position-eth" },
   ]);
   const foreignExposure = await fixture.broker.getCapabilities();
-  assert.ok(!foreignExposure.features.includes("atomic_protected_market_entry"));
-  assert.ok(!foreignExposure.features.includes("verified_exact_full_position_close"));
+  assert.deepEqual([...foreignExposure.unverifiedSymbols].sort(), ["BTCUSDT", "ETHUSDT"]);
+  assert.ok(!foreignExposure.features.includes("impulse_runner_stop_and_partial_close"));
 
   assert.equal(fixture.calls.filter(({ name }) => name === "positions").length, 3);
   assert.equal(fixture.calls.filter(({ name }) => name === "openOrders").length, 3);
@@ -341,4 +346,20 @@ test("mutation boundaries and clock rollback invalidate one-operation market pro
   await fixture.broker.readMarketMark("BTCUSDT", { positionRead: beforeRollback });
   assert.equal(fixture.calls.filter(({ name }) => name === "mark").length,
     afterRollbackCount + 1);
+});
+
+test("verified symbol settings memo expires and never keeps a mismatch", async () => {
+  const f = capabilityFixture();
+  const count = (name) => f.calls.filter((call) => call.name === name).length;
+  await f.broker.getCapabilities();
+  await f.broker.getCapabilities();
+  assert.equal(count("leverage"), 1);
+  f.setNow(initialTime + 60_000);
+  await f.broker.getCapabilities();
+  assert.equal(count("leverage"), 2, "memo expires after 60 s");
+  f.setLongLeverage(5);
+  f.setNow(initialTime + 120_000);
+  await f.broker.getCapabilities();
+  await f.broker.getCapabilities();
+  assert.equal(count("leverage"), 4, "a non-10x read is never memoized");
 });

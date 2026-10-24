@@ -1082,7 +1082,7 @@ test("capability history overlaps symbol settings, mode is read once, and no mar
     ["contract", "feeRate", "riskTiers", "mark"].includes(name)), false);
 });
 
-test("capability fails closed for foreign exposure without querying market-data prerequisites", async () => {
+test("foreign exposure is quarantined per symbol without querying market-data prerequisites", async () => {
   const { api, broker, calls } = apiFixture({ quoteTimestamp: now - 11_000 });
   const baseline = await broker.getCapabilities();
   assert.equal(baseline.verified, true);
@@ -1094,7 +1094,7 @@ test("capability fails closed for foreign exposure without querying market-data 
     positionId: "foreign",
   }];
   const capabilities = await broker.getCapabilities();
-  assert.equal(capabilities.features.includes("atomic_protected_market_entry"), false);
+  assert.ok(capabilities.unverifiedSymbols.includes("ETHUSDT"));
   assert.equal(capabilities.features.includes("impulse_runner_stop_and_partial_close"), false);
 });
 
@@ -1348,8 +1348,10 @@ test("flat residual ETH stops preserve cleanup read trust without startup BTC pr
   const capabilities = await broker.getCapabilities();
   assert.ok(capabilities.features.includes("complete_order_lookup"));
   assert.ok(capabilities.features.includes("impulse_runner_stop_and_partial_close"));
-  assert.equal(capabilities.features.includes("atomic_protected_market_entry"), false);
-  assert.equal(capabilities.features.includes("guarded_long10_leverage_preparation"), false);
+  // Residual cleanup stops are a recognised shape, not a quarantine. Entry on
+  // another symbol is allowed; ETH entry stays refused by the per-symbol
+  // flat/no-orders preflight before signing.
+  assert.deepEqual(capabilities.unverifiedSymbols, []);
   assert.deepEqual(capabilities.evidence.activeManagementSymbols, ["ETHUSDT"]);
   assert.ok(calls.some(([name, symbol]) => name === "history" && symbol === "ETHUSDT"));
   assert.ok(calls.some(([name, symbol]) => name === "fills" && symbol === "ETHUSDT"));
@@ -1438,7 +1440,7 @@ test("active position capability fails closed when its stop or LONG leverage is 
   const unprotected = apiFixture({ positions: [position], orders: [] });
   const withoutStop = await unprotected.broker.getCapabilities();
   assert.equal(withoutStop.features.includes("impulse_runner_stop_and_partial_close"), false);
-  assert.equal(withoutStop.features.includes("atomic_protected_market_entry"), false);
+  assert.deepEqual(withoutStop.unverifiedSymbols, ["ETHUSDT"]);
 
   const wrongLeverage = apiFixture({ positions: [position], orders: [stop] });
   wrongLeverage.api.getLeverage = async (symbol) => {
@@ -1447,7 +1449,7 @@ test("active position capability fails closed when its stop or LONG leverage is 
   };
   const leverageMismatch = await wrongLeverage.broker.getCapabilities();
   assert.equal(leverageMismatch.features.includes("impulse_runner_stop_and_partial_close"), false);
-  assert.equal(leverageMismatch.features.includes("atomic_protected_market_entry"), false);
+  assert.deepEqual(leverageMismatch.unverifiedSymbols, ["ETHUSDT"]);
 });
 
 test("API mock rejects epoch and over-24-hour history/fill requests", async () => {

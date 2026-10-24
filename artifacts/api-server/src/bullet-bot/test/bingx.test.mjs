@@ -262,3 +262,44 @@ test("serializes premium and funding-history requests through the public 1.1s li
   assert.equal(fetchTimes.length, 2);
   assert.ok(Math.abs(fetchTimes[0] - fetchTimes[1]) >= 1100);
 });
+test("bulk tickers read every requested quote in one request without a symbol filter", async () => {
+  let now = 1790352232000;
+  const urls = [];
+  const api = createBingX({
+    clock: () => now,
+    sleep: async (ms) => { now += ms; },
+    fetchImpl: async (url) => {
+      urls.push(new URL(url));
+      return new Response(JSON.stringify({ code: 0, data: [
+        { symbol: "BTC-USDT", lastPrice: "100", askPrice: "100.1", bidPrice: "99.9", closeTime: now },
+        { symbol: "ETH-USDT", lastPrice: "10", askPrice: "10.1", bidPrice: "9.9", closeTime: now - 120_000 },
+        { symbol: "SOL-USDT", lastPrice: "0", askPrice: "1" },
+        { symbol: "XRP-USDT", lastPrice: "1", askPrice: "1.01" },
+      ] }));
+    },
+  });
+  const quotes = await api.tickers(["BTCUSDT", "ETHUSDT", "SOLUSDT", "DOGEUSDT"]);
+  assert.equal(urls.length, 1);
+  assert.equal(urls[0].searchParams.has("symbol"), false);
+  assert.deepEqual([...quotes.keys()], ["BTCUSDT"], "stale, invalid and unrequested rows are skipped");
+  assert.equal(quotes.get("BTCUSDT").ask1Price, "100.1");
+});
+
+test("network and 5xx failures are marked transient; symbol rejections are not", async () => {
+  let now = 1790352232000;
+  let mode = "network";
+  const api = createBingX({
+    clock: () => now,
+    sleep: async (ms) => { now += ms; },
+    fetchImpl: async () => {
+      if (mode === "network") throw new TypeError("fetch failed");
+      if (mode === "5xx") return new Response(JSON.stringify({ code: 1 }), { status: 503 });
+      return new Response(JSON.stringify({ code: 109400, msg: "symbol" }), { status: 200 });
+    },
+  });
+  await assert.rejects(api.ticker("BTCUSDT"), (error) => error.transient === true);
+  mode = "5xx";
+  await assert.rejects(api.ticker("BTCUSDT"), (error) => error.transient === true);
+  mode = "business";
+  await assert.rejects(api.ticker("BTCUSDT"), (error) => error.transient === false);
+});

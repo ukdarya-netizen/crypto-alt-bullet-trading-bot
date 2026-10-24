@@ -1275,3 +1275,54 @@ test("source-discrepancy alerter never calls Telegram for an empty batch", async
   await alerter.send(undefined);
   assert.equal(called, false);
 });
+test("internal lifecycle noise is acknowledged silently and repeats are posted once", async () => {
+  const sentIds = new Set();
+  const sent = [];
+  const rows = [
+    { id: "60", kind: "vst_signal_status_changed", source_signal_id: "s1",
+      detail: { from: "pending", to: "rejected" }, body: { symbol: "DOGEUSDT" },
+      request: null, outcome: null, created_at: new Date() },
+    { id: "61", kind: "vst_position_management_diagnostic", source_signal_id: "s1",
+      detail: { scope: "symbol" }, body: { symbol: "DOGEUSDT" },
+      request: null, outcome: null, created_at: new Date() },
+    { id: "62", kind: "vst_signal_rejected", source_signal_id: "s1",
+      detail: { reason: "signal_expired_before_entry_reservation" },
+      body: { symbol: "DOGEUSDT" }, request: null, outcome: null, created_at: new Date() },
+    { id: "63", kind: "vst_signal_rejected", source_signal_id: "s1",
+      detail: { reason: "signal_expired_before_entry_reservation" },
+      body: { symbol: "DOGEUSDT" }, request: null, outcome: null, created_at: new Date() },
+  ];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, args) {
+          if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events e")) {
+            return { rows: rows.filter((row) => !sentIds.has(row.id)) };
+          }
+          if (sql.includes("SET telegram_sent_at")) {
+            sentIds.add(args[0]);
+            return { rows: [] };
+          }
+          return { rows: [] };
+        },
+        release() {},
+      };
+    },
+  };
+  const notifier = createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123",
+    fetcher: async (_url, options) => {
+      sent.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await notifier.tick();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /Сигнал отклонён/);
+  assert.deepEqual([...sentIds], ["60", "61", "62"]);
+  await notifier.tick();
+  assert.equal(sent.length, 1, "the identical repeat is not posted again");
+  assert.deepEqual([...sentIds], ["60", "61", "62", "63"]);
+});

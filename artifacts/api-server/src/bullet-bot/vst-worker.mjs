@@ -767,6 +767,15 @@ function hasFlatSplitCleanupReadTrust(capabilities) {
     requiredFeatures.every((feature) => capabilities.features.includes(feature));
 }
 
+// The broker advertises core capabilities account-wide but lists symbols
+// whose own exchange rows are not verified (missing/extra stop, orphan order,
+// wrong leverage). Only those symbols are quarantined from regular mutation.
+function capabilityUnverifiedSymbol(capabilities, symbolKey) {
+  const list = capabilities?.unverifiedSymbols;
+  if (!Array.isArray(list) || !symbolKey) return false;
+  return list.some((symbol) => normalizeSymbolKey(symbol) === symbolKey);
+}
+
 async function inspectCapabilities(
   broker, recordTiming = () => {}, requiredFeatures = REQUIRED_CAPABILITIES,
 ) {
@@ -14179,6 +14188,7 @@ export function createVstWorker({
         const unresolvedForSymbol = unresolved.filter((intent) =>
           intentBlocksSymbol(intent, symbolKey));
         const regularMutationAllowed = Boolean(assessment.mutationCapabilities) &&
+          !capabilityUnverifiedSymbol(assessment.capabilities, symbolKey) &&
           unresolvedForSymbol.length === 0 &&
           !unresolvedMarginTopUpBySymbol.has(symbolKey) &&
           state?.protectionDegradation == null &&

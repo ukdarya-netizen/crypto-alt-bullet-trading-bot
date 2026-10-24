@@ -741,8 +741,39 @@ export function createVstBroker({
   async function performMutation(method, ...args) {
     invalidatePositionMarketProofs();
     successfulLookupProbe = null;
+    capabilitySettingsMemo.clear();
     return api[method](...args);
   }
+
+  // Capability-probe-only memo of per-symbol margin type + leverage, kept
+  // ONLY for symbols already verified ISOLATED + LONG 10x. Without it every
+  // tick re-read both settings for every open symbol (2 signed calls each
+  // behind the 1.1 s VST pacer): ~8 s per tick with 1 position, ~27 s with
+  // 10, so +5% takes and fresh entries waited behind the reads. Balance,
+  // positions, open orders and position mode are still read every time; any
+  // mutation clears the memo; every entry/leverage/margin operation re-reads
+  // its own settings before signing.
+  const capabilitySettingsMemo = new Map();
+  const capabilitySettingsMemoTtlMs = 60_000;
+  async function readCapabilitySymbolSettings(symbol, now) {
+    const cached = capabilitySettingsMemo.get(symbol);
+    if (cached && Number.isFinite(now) && now >= cached.at &&
+        now - cached.at < capabilitySettingsMemoTtlMs) {
+      return { symbol, marginMode: cached.marginMode, leverage: cached.leverage };
+    }
+    const [marginMode, leverage] = await Promise.all([
+      readCoalesced("getMarginType", symbol),
+      readCoalesced("getLeverage", symbol),
+    ]);
+    if (marginMode === "ISOLATED" && Number(leverage?.longLeverage) === 10 &&
+        Number.isFinite(now)) {
+      capabilitySettingsMemo.set(symbol, { at: now, marginMode, leverage });
+    } else {
+      capabilitySettingsMemo.delete(symbol);
+    }
+    return { symbol, marginMode, leverage };
+  }
+
 
   function reportOperationTiming(startedAt, context) {
     try {
@@ -10214,13 +10245,8 @@ export function createVstBroker({
       }),
       // Position mode is account-wide, not per-symbol.
       readCoalesced("getPositionMode"),
-      mapWithConcurrency(probeSymbols, 3, async (symbol) => {
-        const [marginMode, leverage] = await Promise.all([
-          readCoalesced("getMarginType", symbol),
-          readCoalesced("getLeverage", symbol),
-        ]);
-        return { symbol, marginMode, leverage };
-      }),
+      mapWithConcurrency(probeSymbols, 3, (symbol) =>
+        readCapabilitySymbolSettings(symbol, historyWindowNow)),
     ]);
     reportTiming("capabilityHistoryAndSymbolReads", stageStarted);
     const settingsBySymbol = symbolReads.map(({ marginMode, leverage }) =>
@@ -10447,8 +10473,34 @@ export function createVstBroker({
       }) && accountOrders.every((row) => activeSymbolSet.has(row.symbol));
     const canManageImpulse = missingImpulseAdapters.length === 0 &&
       hasVerifiedCompleteLookup && impulseAccountReady;
+    // Symbol-scoped health: one deviating symbol (missing/extra stop, wrong
+    // leverage, orphan order) must quarantine ONLY that symbol, never freeze
+    // entries/stops/closes for every other symbol on the account. Each
+    // mutation is re-verified against its own symbol's fresh rows before
+    // signing (entry requires a flat symbol, management reads only its symbol).
+    const unhealthyActiveSymbols = activeSymbols.filter((symbol) => {
+      const index = probeSymbols.indexOf(symbol);
+      if (index < 0) return true;
+      const settings = settingsBySymbol[index];
+      const name = symbolName(symbol);
+      return !(Number(settings.leverage.longLeverage) === 10 &&
+        settings.mode === "HEDGE" && settings.marginMode === "ISOLATED" &&
+        verifiedActiveLongProtection(symbol,
+          activePositions.filter((row) => row.symbol === name),
+          accountOrders.filter((row) => row.symbol === name)));
+    });
+    const orphanOrderSymbols = activePositions.length === 0 && verifiedFlatCleanupOrders
+      ? []
+      : orderExchangeNames.filter((name) => !activeSymbolSet.has(name))
+        .map((name) => name.replace("-", ""));
+    const unverifiedSymbols = [...new Set([
+      ...unhealthyActiveSymbols, ...orphanOrderSymbols,
+    ])];
+    const symbolScopedCoreReady = mode === "HEDGE" &&
+      (activePositions.length > 0 || accountOrders.length > 0);
     const canManageCorePosition = canEnter ||
-      activePositions.length > 0 && impulseAccountReady;
+      activePositions.length > 0 && impulseAccountReady ||
+      symbolScopedCoreReady;
     // Source exits have a narrower authorization path than strategy/core
     // management: advertise it from fresh symbol-scoped position, owned-stop,
     // and HEDGE/ISOLATED LONG 10x reads. Source lineage and exact stop IDs are
@@ -10545,6 +10597,7 @@ export function createVstBroker({
           reason: "Fresh signed VST control reads did not prove safe LONG 10x HEDGE/ISOLATED settings or the native exact known-stop cancellation adapter is unavailable.",
         }] : []),
       ],
+      unverifiedSymbols,
       evidence: {
         balanceAsset: "VST",
         signedOrderHistoryRead: true,

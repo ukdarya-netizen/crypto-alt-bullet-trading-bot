@@ -774,10 +774,46 @@ export function createSourceSyncLivenessAlerter({ token, chatId, fetcher = fetch
   };
 }
 
+// Internal lifecycle noise. These rows stay in the vst_events ledger (marked
+// delivered silently) but never reach the chat: every signal still gets its
+// owner-facing trace (opened / rejected with reason / closed / needs action),
+// while per-status-change and per-phase diagnostics no longer flood the chat
+// and no longer delay real alerts behind the one-message-per-tick pace.
+// Kinds not listed here (including future kinds) are still delivered.
+const SILENT_VST_EVENT_KINDS = new Set([
+  "vst_signal_status_changed",
+  "vst_position_management_diagnostic",
+  "vst_impulse_split_phase_verified",
+  "vst_original_stop_cancel_pre_mutation_read_refused",
+  "vst_raise_stop_pre_upgrade_refusal_confirmed",
+  "vst_raise_stop_refusal_settled_after_closed_fill",
+  "vst_raise_stop_equal_price_noop_confirmed",
+  "vst_stop_protection_adopted",
+  "vst_stop_degraded_protection_observed",
+  "vst_impulse_runner_fill_cleanup_pending",
+  "vst_impulse_partial_close_cleanup_pending",
+  "vst_impulse_runner_cleanup_completed",
+  "vst_impulse_split_cleanup_verified",
+  "vst_impulse_flat_close_cleanup_pending",
+  "vst_impulse_flat_stops_cleaned",
+]);
+// The same problem (kind + signal + reason) is posted at most once per window.
+const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+export function isUserFacingVstEvent(row) {
+  if (!row || SILENT_VST_EVENT_KINDS.has(row.kind)) return false;
+  if (row.kind === "vst_action_reconciled") {
+    const operation = row.request?.operation ?? row.outcome?.operation;
+    return ["close_leg", "raise_stop", "set_runner_break_even"].includes(operation);
+  }
+  return true;
+}
+
 export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch }) {
   if (!pool || typeof pool.connect !== "function") throw new Error("Telegram notifier needs a DB pool");
   validateTelegramCredentials(token, chatId);
   const retryAfterByEvent = new Map();
+  const postedAtByKey = new Map();
   return {
     async tick() {
       let client;
@@ -807,7 +843,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
           else cooledDownIds.push(eventId);
         }
         const result = await client.query(
-          `SELECT e.id, e.kind, e.detail, e.created_at, s.body, i.request, i.outcome
+          `SELECT e.id, e.kind, e.detail, e.created_at, e.source_signal_id, s.body, i.request, i.outcome
            FROM vst_events e
            LEFT JOIN vst_signals s ON s.source_signal_id = e.source_signal_id
            LEFT JOIN vst_order_intents i ON i.client_order_id = e.client_order_id
@@ -820,7 +856,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
               'vst_entry_margin_top_up_pending',
               'vst_impulse_entry_margin_top_up_pending',
               'vst_impulse_entry_verified_split_pending'
-            ) THEN 0 ELSE 1 END, e.id LIMIT 5`,
+            ) THEN 0 ELSE 1 END, e.id LIMIT 50`,
           [cooledDownIds],
         );
         let firstEventError;
@@ -828,6 +864,21 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
           const eventId = String(row.id);
           const retryAt = retryAfterByEvent.get(eventId);
           if (retryAt > Date.now()) continue;
+          let suppress = !isUserFacingVstEvent(row);
+          const repeatKey = `${row.kind}|${row.source_signal_id ?? ""}|${row.detail?.reason ?? ""}`;
+          const lastPosted = postedAtByKey.get(repeatKey);
+          if (!suppress && lastPosted != null &&
+              Date.now() - lastPosted < VST_TELEGRAM_REPEAT_WINDOW_MS) {
+            suppress = true;
+          }
+          if (suppress) {
+            // Kept in the ledger; never posted. Does not use the send pace.
+            await client.query(
+              "UPDATE vst_events SET telegram_sent_at = now() WHERE id = $1 AND telegram_sent_at IS NULL",
+              [row.id],
+            );
+            continue;
+          }
           let message;
           try {
             message = formatVstTelegramEvent({
@@ -861,6 +912,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
             throw error;
           }
           retryAfterByEvent.delete(eventId);
+          postedAtByKey.set(repeatKey, Date.now());
           // Keep the existing delivery pace: at most one accepted message
           // per tick, even when a backlog has built up.
           break;

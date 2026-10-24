@@ -1419,3 +1419,36 @@ test("live mode fails closed even when an adapter exists", () => {
     /PAPER_ONLY_SIGNAL/,
   );
 });
+test("PAPER opens several simultaneous fresh signals in one tick", async () => {
+  const h = harness(sample, undefined, undefined, 1000, undefined,
+    { strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  for (const suffix of ["1", "2"]) {
+    const id = `${sample.sourceSignalId}${suffix}`;
+    h.rows.set(id, {
+      sourceSignalId: id,
+      body: { ...structuredClone(sample), sourceSignalId: id },
+      status: "pending",
+    });
+  }
+  await h.worker.tick();
+  assert.deepEqual([...h.rows.values()].map((row) => row.status),
+    ["open", "open", "open"]);
+  assert.equal([...h.positions.values()].filter((p) => p.status === "open").length, 3);
+});
+
+test("PAPER keeps a fresh signal pending after a transient instrument read failure", async () => {
+  let failures = 1;
+  const h = harness(sample, async () => {
+    if (failures-- > 0) {
+      const error = new Error("BingX public market request failed: TypeError");
+      error.transient = true;
+      throw error;
+    }
+    return true;
+  }, undefined, 100, undefined,
+  { strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await h.worker.tick();
+  assert.equal(h.rows.get(sample.sourceSignalId).status, "pending");
+  await h.worker.tick();
+  assert.equal(h.rows.get(sample.sourceSignalId).status, "open");
+});

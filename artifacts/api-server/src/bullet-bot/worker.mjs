@@ -25,6 +25,11 @@ import { applySourceProtection, evaluateSourceFollower } from "./source-position
 import { FULL_TAKE_5PCT, applyFullTake } from "./fixed-price-take-profit.mjs";
 import { validateSourceCommand, directCloseRequest } from "./source-command-contract.mjs";
 
+const MAX_PAPER_ENTRIES_PER_TICK = 10;
+const PAPER_QUOTE_CONCURRENCY = 6;
+const PAPER_SCENARIO_PASS_INTERVAL_MS = 15_000;
+const MAX_PAPER_SCENARIO_OBSERVATIONS_PER_PASS = 10;
+
 const safeReason = (error) =>
   error instanceof Error ? error.name + ": " + error.message.slice(0, 300) : "Unknown error";
 
@@ -180,6 +185,9 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
     try {
       validated = await exchange.validateOrder(signal);
     } catch (error) {
+      // A network/429/5xx failure says nothing about the instrument: leave
+      // the signal pending so the next tick retries while it is fresh.
+      if (mode === "paper" && error?.transient === true) throw error;
       await store.setSignalStatus(id, "rejected", safeReason(error));
       return;
     }
@@ -495,7 +503,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
          Number(position.remainingQty) <= 0)) {
       throw new Error("A source-directed PAPER close requires a positive remaining quantity");
     }
-    const quote = await exchange.ticker(position.symbol);
+    const quote = await quoteFor(position.symbol);
     const quotePrice = validatedLastPrice(quote?.lastPrice);
     if (sourceExitEvidence) {
       const quoteAt = Date.parse(quote?.quoteAt ?? "");
@@ -1184,7 +1192,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
 
   async function watchClosedScenarios(record) {
     const position = record.snapshot;
-    const quote = await exchange.ticker(position.symbol);
+    const quote = await quoteFor(position.symbol);
     const price = Number(validatedLastPrice(quote?.lastPrice));
     const updated = observeScenarios(position.scenarioModel, {
       price,
@@ -1194,20 +1202,99 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
     await store.updateClosedScenarios(position.sourceSignalId, position.scenarioModel, updated);
   }
 
+  // One quote per symbol per tick, fetched in parallel. Before this every
+  // open position and every closed-scenario observation did its own
+  // sequential HTTP ticker call, so a tick grew linearly with history and
+  // new signals waited behind it until they went stale (10 min TTL).
+  let tickQuotes = null;
+  let lastScenarioPassAt = -Infinity;
+  let scenarioCursor = 0;
+  function quoteFor(symbol) {
+    if (!tickQuotes) return exchange.ticker(symbol);
+    let pending = tickQuotes.get(symbol);
+    if (!pending) {
+      pending = exchange.ticker(symbol);
+      pending.catch(() => {});
+      tickQuotes.set(symbol, pending);
+    }
+    return pending;
+  }
+  async function prefetchQuotes(symbols) {
+    let unique = [...new Set(symbols.filter((symbol) =>
+      typeof symbol === "string" && symbol !== ""))];
+    if (unique.length > 1 && typeof exchange.tickers === "function") {
+      // One bulk request instead of one paced (1.1 s) request per symbol.
+      try {
+        const bulk = await exchange.tickers(unique);
+        for (const [symbol, quote] of bulk) {
+          tickQuotes.set(symbol, Promise.resolve(quote));
+        }
+        unique = unique.filter((symbol) => !bulk.has(symbol));
+      } catch {
+        // Fall back to single-symbol quotes below.
+      }
+    }
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(PAPER_QUOTE_CONCURRENCY, unique.length) },
+      async () => {
+        while (cursor < unique.length) {
+          const symbol = unique[cursor++];
+          try { await quoteFor(symbol); } catch {}
+        }
+      });
+    await Promise.all(workers);
+  }
+
+  async function drainPendingEntries() {
+    // Several signals can arrive together; one entry per tick let later ones
+    // expire (stale_at_execution) behind the monitoring work.
+    const seen = new Set();
+    for (let index = 0; index < MAX_PAPER_ENTRIES_PER_TICK; index += 1) {
+      const next = await store.getPending(clock());
+      if (!next || seen.has(next.sourceSignalId)) return;
+      seen.add(next.sourceSignalId);
+      try {
+        const outcome = await open(next);
+        if (outcome?.kind === "waiting") return;
+      } catch (error) {
+        if (mode === "paper" &&
+            clock() - Date.parse(next.body?.signalAt) < SIGNAL_TTL_MS) {
+          // PAPER submits nothing to an exchange: a transient quote/instrument
+          // read failure is safely retried next tick while the signal is
+          // fresh (the TTL check in open() rejects it once it is not).
+          continue;
+        }
+        // Unknown exchange outcomes remain terminal for automated entry:
+        // never retry a market order merely because a request timed out.
+        await store.setSignalStatus(next.sourceSignalId, "error", safeReason(error));
+      }
+    }
+  }
+
   async function tick() {
     return store.withLeaderLock(async () => {
-      const next = await store.getPending(clock());
-      if (next) {
-        try {
-          await open(next);
-        } catch (error) {
-          // Unknown exchange outcomes remain terminal for automated entry:
-          // never retry a market order merely because a request timed out.
-          await store.setSignalStatus(next.sourceSignalId, "error", safeReason(error));
-        }
+      tickQuotes = null;
+      await drainPendingEntries();
+      const openRecords = await store.listOpenPositions();
+      let scenarioRecords = [];
+      if (mode === "paper" && typeof store.listPendingScenarios === "function" &&
+          clock() - lastScenarioPassAt >= PAPER_SCENARIO_PASS_INTERVAL_MS) {
+        lastScenarioPassAt = clock();
+        const all = await store.listPendingScenarios();
+        if (scenarioCursor >= all.length) scenarioCursor = 0;
+        scenarioRecords = all.slice(scenarioCursor,
+          scenarioCursor + MAX_PAPER_SCENARIO_OBSERVATIONS_PER_PASS);
+        scenarioCursor += scenarioRecords.length;
+      }
+      if (mode === "paper") {
+        tickQuotes = new Map();
+        await prefetchQuotes([
+          ...openRecords.map((record) => record?.snapshot?.symbol),
+          ...scenarioRecords.map((record) => record?.snapshot?.symbol),
+        ]);
       }
       const positionsToRefresh = [];
-      for (const record of await store.listOpenPositions()) {
+      for (const record of openRecords) {
         try {
           if (mode === "paper") {
             const updated = await watchPaper(record);
@@ -1223,6 +1310,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
           }
         }
       }
+      tickQuotes = null;
       for (const position of positionsToRefresh) {
         try {
           await refreshPaperMark(position);
@@ -1230,8 +1318,9 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
           // The ticker-driven position transition was committed already.
         }
       }
-      if (mode === "paper" && typeof store.listPendingScenarios === "function") {
-        for (const record of await store.listPendingScenarios()) {
+      if (scenarioRecords.length) {
+        tickQuotes = new Map();
+        for (const record of scenarioRecords) {
           try {
             await watchClosedScenarios(record);
           } catch {
@@ -1239,6 +1328,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
             // during an exchange outage.
           }
         }
+        tickQuotes = null;
       }
       if (mode === "paper" && typeof store.listPaperFundingCandidates === "function") {
         try {
