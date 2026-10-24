@@ -137,3 +137,18 @@ test("not-opened message always carries a readable reason", () => {
     detail: { reason: "vst_order_rejected", operation: "close_leg" },
   })), null, "a rejected close is not a rejected entry");
 });
+
+test("a touched +5% take that is not closed gets two distinct, once-only notices", () => {
+  const detail = { entryPrice: "0.009989999999999999", observedPrice: "0.01053",
+    reason: "source_exit_same_symbol_intent_unresolved" };
+  assert.equal(formatVstTradeOutcome(event("vst_full_take_close_delayed", { detail })),
+    "BingX VST · WOOUSDT\nЦена достигла +5%, но позиция ещё не закрыта. Бот продолжает закрывать её. Стоп-лосс на бирже сохраняется.\n" +
+    "Вход 0.00999 · цена 0.01053\nПричина: по монете не завершена предыдущая операция, бот сверяет её с биржей");
+  const stuck = formatVstTradeOutcome(event("vst_full_take_close_stuck", {
+    detail: { ...detail, reason: "full_take_close_not_attempted" } }));
+  assert.match(stuck, /Закройте её вручную на BingX VST/);
+  assert.match(stuck, /Причина: цикл бота ещё не дошёл до закрытия/);
+  assert.notEqual(vstTradeOutcome(event("vst_full_take_close_delayed")),
+    vstTradeOutcome(event("vst_full_take_close_stuck")), "separate repeat keys");
+  assert.equal(vstTradeOutcome(event("vst_full_take_touched")), null, "a touch alone is not posted");
+});

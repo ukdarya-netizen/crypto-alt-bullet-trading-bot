@@ -38,17 +38,26 @@ export function fullTakeRequest(position, mark, now) {
       mark.symbol !== position.symbol ||
       !Number.isFinite(at) || now - at > 10_000 || at > now + 2_000 ||
       !reachedFullTake(position.entryPrice, mark.price)) return null;
-  const requestId = fullTakeRequestId(position.sourceSignalId, position.entryPrice);
+  return fullTakeRowFromTouch({
+    sourceSignalId: position.sourceSignalId, symbol: position.symbol,
+    entryPrice: position.entryPrice, observedPrice: mark.price, observedAt: mark.observedAt,
+  });
+}
+
+// Rebuilds the exact evidence from a durable touch record (vst_full_take_touched).
+// The result is only usable if fullTakeEvidenceValid accepts it.
+export function fullTakeRowFromTouch({ sourceSignalId, symbol, entryPrice, observedPrice, observedAt }) {
+  const requestId = fullTakeRequestId(sourceSignalId, entryPrice);
   const evidence = {
     reason: FULL_TAKE_REASON, rule: FULL_TAKE_5PCT, issuer: "executor_policy",
-    sourceSignalId: position.sourceSignalId, symbol: position.symbol,
-    entryPrice: String(position.entryPrice), observedPrice: String(mark.price),
+    sourceSignalId, symbol,
+    entryPrice: String(entryPrice), observedPrice: String(observedPrice),
     sourceAction: null, sourceStatus: "executor_policy",
-    sourceUpdatedAt: mark.observedAt, sourceClosedAt: null, sourceExitPrice: null,
-    sourceCancelReason: null, exitDecisionAt: mark.observedAt,
-    asOf: mark.observedAt, observedAt: mark.observedAt,
+    sourceUpdatedAt: observedAt, sourceClosedAt: null, sourceExitPrice: null,
+    sourceCancelReason: null, exitDecisionAt: observedAt,
+    asOf: observedAt, observedAt,
   };
-  return { requestId, sourceSignalId: position.sourceSignalId, symbol: position.symbol,
+  return { requestId, sourceSignalId, symbol,
     reason: FULL_TAKE_REASON, asOf: evidence.asOf, observedAt: evidence.observedAt, evidence };
 }
 

@@ -1018,6 +1018,25 @@ export function createVstStore(pool) {
       );
     },
 
+    // Durable full-take touches and escalations for still-unclosed positions.
+    // vst_events is append-only, so a touch survives restarts and snapshot
+    // rewrites by the worker.
+    async listFullTakeEvents() {
+      const result = await pool.query(
+        `SELECT e.source_signal_id, e.kind, e.detail, e.created_at
+         FROM vst_events e
+         JOIN vst_positions p ON p.source_signal_id = e.source_signal_id
+         WHERE e.kind IN ('vst_full_take_touched', 'vst_full_take_close_delayed',
+                          'vst_full_take_close_stuck')
+           AND p.status IN ('open', 'closing', 'unknown')
+         ORDER BY e.id`,
+      );
+      return result.rows.map((row) => ({
+        sourceSignalId: row.source_signal_id, kind: row.kind,
+        detail: row.detail, createdAt: row.created_at,
+      }));
+    },
+
     async listOpenPositions() {
       const result = await pool.query(
         `SELECT source_signal_id, symbol, status, snapshot, updated_at

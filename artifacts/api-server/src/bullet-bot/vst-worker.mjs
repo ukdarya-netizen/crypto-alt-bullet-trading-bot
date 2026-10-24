@@ -35,7 +35,7 @@ import { evaluatePreRunnerCloseRetry } from "./vst-close-retry-guard.mjs";
 import { applySourceProtection, evaluateSourceFollower } from "./source-position-control.mjs";
 import { isTradablePatternId } from "./pattern-eligibility.mjs";
 import { FULL_TAKE_5PCT, FULL_TAKE_REASON, fullTakeRequest, fullTakeRequestId,
-  fullTakeEvidenceValid } from "./fixed-price-take-profit.mjs";
+  fullTakeEvidenceValid, fullTakeRowFromTouch } from "./fixed-price-take-profit.mjs";
 
 function safeVstProofEvidence(source, getChecks) {
   try {
@@ -1468,10 +1468,34 @@ export function createVstWorker({
   onTiming,
 }) {
   let directCloseCompletion = null;
-  // sourceSignalId -> full-take evidence observed between management ticks.
-  // Bound to the position's exact entry via fullTakeRequestId, so a changed
-  // entry invalidates it automatically.
+  // ---- Fixed +5% take: detection, durable latch, dedicated close lane and
+  // escalation. Failure policy:
+  //  * a touch is latched in memory, in the position snapshot and as an
+  //    append-only vst_full_take_touched event (restart-safe);
+  //  * every tick first tries the latched close through the same verified
+  //    full-exit lane as an owner close command, independent of unrelated
+  //    position work (margin top-up waits, stop raises, capability gaps);
+  //  * the last reason the close did not complete is kept per position;
+  //  * if the position is still open FULL_TAKE_DELAYED_MS after the touch,
+  //    one Telegram notice is queued; after FULL_TAKE_STUCK_MS a second one
+  //    asks for a manual close. Both are durable and sent once.
+  // The exchange stop-loss is never touched by this path until the verified
+  // close lane itself cleans up exact owned stops after a confirmed close.
+  const FULL_TAKE_DELAYED_MS = 90_000;
+  const FULL_TAKE_STUCK_MS = 15 * 60_000;
+  // sourceSignalId -> evidence (bound to the exact entry via requestId).
   const fullTakeLatches = new Map();
+  // sourceSignalId -> { lastReason, delayedSent, stuckSent }
+  const fullTakeProgress = new Map();
+
+  function fullTakeProgressFor(sourceSignalId) {
+    let progress = fullTakeProgress.get(sourceSignalId);
+    if (!progress) {
+      progress = { lastReason: null, delayedSent: false, stuckSent: false };
+      fullTakeProgress.set(sourceSignalId, progress);
+    }
+    return progress;
+  }
 
   function latchedFullTakeEvidence(record) {
     const state = record?.snapshot ?? {};
@@ -1484,48 +1508,185 @@ export function createVstWorker({
     return null;
   }
 
-  // Read-only: one bulk last-price read for every open full-take position.
-  // A touch of exactly +5% from the position's own fill entry is latched;
-  // the close itself always goes through managePosition's verified lane.
-  async function observeFullTakePrices() {
-    if (exitStrategy !== FULL_TAKE_5PCT || typeof broker.readLastPrices !== "function" ||
-        typeof store.listOpenPositions !== "function") return 0;
-    const open = await store.listOpenPositions();
-    const openIds = new Set(open.map((record) => record?.sourceSignalId));
-    for (const id of [...fullTakeLatches.keys()]) {
-      if (!openIds.has(id)) fullTakeLatches.delete(id);
+  function forgetClosedFullTakes(openRecords) {
+    const openIds = new Set(openRecords.map((record) => record?.sourceSignalId));
+    for (const id of [...fullTakeLatches.keys()]) if (!openIds.has(id)) fullTakeLatches.delete(id);
+    for (const id of [...fullTakeProgress.keys()]) if (!openIds.has(id)) fullTakeProgress.delete(id);
+  }
+
+  // Restores latches and escalation flags from the append-only event ledger.
+  async function loadDurableFullTakes(openRecords) {
+    if (typeof store.listFullTakeEvents !== "function") return;
+    let rows;
+    try { rows = await store.listFullTakeEvents(); } catch (error) {
+      recordVstDiagnostic(error, { stage: "fullTakeWatch", operation: "load_full_take_events" });
+      return;
     }
-    const records = open.filter((record) =>
-      record?.status === "open" && Number(record.snapshot?.remainingQty) > 0 &&
-      record.snapshot?.environment === "vst" &&
-      typeof record.snapshot?.symbol === "string" &&
-      !latchedFullTakeEvidence(record));
-    if (records.length === 0) return 0;
-    const quotes = await broker.readLastPrices([...new Set(records.map((r) => r.snapshot.symbol))]);
-    const bySymbol = new Map((Array.isArray(quotes) ? quotes : []).map((q) => [q.symbol, q]));
-    let latched = 0;
-    for (const record of records) {
-      const quote = bySymbol.get(record.snapshot.symbol);
-      if (!quote) continue;
-      const row = fullTakeRequest({ ...record.snapshot, sourceSignalId: record.sourceSignalId },
-        { ...quote, price: quote.priceDecimal ?? quote.price }, Number(clock()));
-      if (!row) continue;
-      fullTakeLatches.set(record.sourceSignalId, row.evidence);
-      latched += 1;
-      try {
-        await store.latchFullTakeEvidence?.(record.sourceSignalId, row.evidence);
-        await store.recordEvent?.(record.sourceSignalId, "vst_full_take_touched", {
-          symbol: record.snapshot.symbol, entryPrice: row.evidence.entryPrice,
-          observedPrice: row.evidence.observedPrice, observedAt: row.evidence.observedAt,
-          source: quote.source ?? "last_trade",
-        });
-      } catch (error) {
-        // The in-memory latch still closes the position on the next tick.
-        recordVstDiagnostic(error, { stage: "fullTakeWatch", operation: "latch_full_take",
-          symbol: record.snapshot.symbol, sourceSignalId: record.sourceSignalId });
+    const byId = new Map(openRecords.map((record) => [record.sourceSignalId, record]));
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const record = byId.get(row?.sourceSignalId);
+      if (!record) continue;
+      if (row.kind === "vst_full_take_close_delayed") fullTakeProgressFor(record.sourceSignalId).delayedSent = true;
+      if (row.kind === "vst_full_take_close_stuck") fullTakeProgressFor(record.sourceSignalId).stuckSent = true;
+      if (row.kind !== "vst_full_take_touched" || latchedFullTakeEvidence(record)) continue;
+      const detail = row.detail ?? {};
+      const rebuilt = fullTakeRowFromTouch({
+        sourceSignalId: record.sourceSignalId, symbol: record.snapshot?.symbol,
+        entryPrice: detail.entryPrice, observedPrice: detail.observedPrice,
+        observedAt: detail.observedAt,
+      });
+      if (detail.symbol === record.snapshot?.symbol &&
+          fullTakeEvidenceValid(rebuilt.evidence, record.sourceSignalId, record.snapshot?.symbol,
+            fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice))) {
+        fullTakeLatches.set(record.sourceSignalId, rebuilt.evidence);
       }
     }
-    return latched;
+  }
+
+  function noteFullTakeProgress(sourceSignalId, reason) {
+    if (typeof reason === "string" && reason) fullTakeProgressFor(sourceSignalId).lastReason = reason;
+  }
+
+  // Durable, once-only notices for a touched take that has not closed.
+  async function escalateStalledFullTakes(openRecords) {
+    const now = Number(clock());
+    for (const record of openRecords) {
+      if (record?.status === "closed") continue;
+      const evidence = latchedFullTakeEvidence(record);
+      if (!evidence) continue;
+      const age = now - Date.parse(evidence.observedAt);
+      if (!Number.isFinite(age)) continue;
+      const progress = fullTakeProgressFor(record.sourceSignalId);
+      const stage = age >= FULL_TAKE_STUCK_MS && !progress.stuckSent ? "stuck"
+        : age >= FULL_TAKE_DELAYED_MS && !progress.delayedSent && !progress.stuckSent ? "delayed"
+          : null;
+      if (!stage) continue;
+      try {
+        await store.recordEvent?.(record.sourceSignalId,
+          stage === "stuck" ? "vst_full_take_close_stuck" : "vst_full_take_close_delayed", {
+            symbol: record.snapshot?.symbol, entryPrice: evidence.entryPrice,
+            observedPrice: evidence.observedPrice, observedAt: evidence.observedAt,
+            ageSeconds: Math.round(age / 1000),
+            reason: progress.lastReason ?? "full_take_close_not_attempted",
+          });
+        if (stage === "stuck") progress.stuckSent = true;
+        progress.delayedSent = true;
+      } catch (error) {
+        recordVstDiagnostic(error, { stage: "fullTakeWatch", operation: "escalate_full_take",
+          symbol: record.snapshot?.symbol, sourceSignalId: record.sourceSignalId });
+      }
+    }
+  }
+
+  // Runs on its own timer, independent of the (possibly slow or stuck) tick.
+  // Read-only towards the exchange: one bulk last-price read. Returns the
+  // number of new touches so the caller can wake the worker.
+  async function observeFullTakePrices() {
+    if (exitStrategy !== FULL_TAKE_5PCT || typeof store.listOpenPositions !== "function") return 0;
+    const open = (await store.listOpenPositions()).filter((record) => record?.status !== "closed");
+    forgetClosedFullTakes(open);
+    await loadDurableFullTakes(open);
+    let latched = 0;
+    try {
+      const records = open.filter((record) =>
+        record?.status === "open" && Number(record.snapshot?.remainingQty) > 0 &&
+        record.snapshot?.environment === "vst" &&
+        typeof record.snapshot?.symbol === "string" &&
+        !latchedFullTakeEvidence(record));
+      if (records.length === 0 || typeof broker.readLastPrices !== "function") return 0;
+      const quotes = await broker.readLastPrices([...new Set(records.map((r) => r.snapshot.symbol))]);
+      const bySymbol = new Map((Array.isArray(quotes) ? quotes : []).map((q) => [q.symbol, q]));
+      for (const record of records) {
+        const quote = bySymbol.get(record.snapshot.symbol);
+        if (!quote) continue;
+        const row = fullTakeRequest({ ...record.snapshot, sourceSignalId: record.sourceSignalId },
+          { ...quote, price: quote.priceDecimal ?? quote.price }, Number(clock()));
+        if (!row) continue;
+        fullTakeLatches.set(record.sourceSignalId, row.evidence);
+        latched += 1;
+        try {
+          await store.recordEvent?.(record.sourceSignalId, "vst_full_take_touched", {
+            symbol: record.snapshot.symbol, entryPrice: row.evidence.entryPrice,
+            observedPrice: row.evidence.observedPrice, observedAt: row.evidence.observedAt,
+            source: quote.source ?? "last_trade",
+          });
+          await store.latchFullTakeEvidence?.(record.sourceSignalId, row.evidence);
+        } catch (error) {
+          // The in-memory latch still closes the position on the next tick.
+          recordVstDiagnostic(error, { stage: "fullTakeWatch", operation: "latch_full_take",
+            symbol: record.snapshot.symbol, sourceSignalId: record.sourceSignalId });
+        }
+      }
+      return latched;
+    } finally {
+      // Escalation must run even when the price read fails or the tick hangs.
+      await escalateStalledFullTakes(open);
+    }
+  }
+
+  // Tick-start lane: close every latched take through the verified full-exit
+  // path. Returns an "acted" result after one exchange action so the tick
+  // boundary (one mutation per tick) is preserved.
+  async function processLatchedFullTakes(recordTiming = null) {
+    if (exitStrategy !== FULL_TAKE_5PCT) return null;
+    const startedAt = performance.now();
+    try {
+      const open = (await store.listOpenPositions()).filter((record) => record?.status !== "closed");
+      forgetClosedFullTakes(open);
+      await loadDurableFullTakes(open);
+      let capabilities;
+      for (const record of open) {
+        const evidence = latchedFullTakeEvidence(record);
+        if (!evidence) continue;
+        const symbol = record.snapshot?.symbol;
+        if (sourceExitBlockedSymbols.has(normalizeSymbolKey(symbol))) {
+          noteFullTakeProgress(record.sourceSignalId, "source_exit_blocked_for_symbol");
+          continue;
+        }
+        if (capabilities === undefined) {
+          try { capabilities = await broker.getCapabilities(); } catch { capabilities = null; }
+        }
+        if (!capabilities) {
+          noteFullTakeProgress(record.sourceSignalId, "source_exit_capabilities_unavailable");
+          continue;
+        }
+        const requestId = fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice);
+        const row = { requestId, sourceSignalId: record.sourceSignalId, symbol,
+          reason: FULL_TAKE_REASON, asOf: evidence.asOf, observedAt: evidence.observedAt, evidence };
+        let result;
+        let completed = null;
+        directCloseCompletion = { requestId, completed: null };
+        try {
+          result = await processSourceExitRequest(row, record, capabilities,
+            sourceExitPrerequisiteAttemptsThisTick);
+        } catch (error) {
+          recordVstDiagnostic(error, { stage: "fullTakeExits", operation: "full_take_close",
+            symbol, sourceSignalId: record.sourceSignalId });
+          noteFullTakeProgress(record.sourceSignalId, "full_take_close_exception");
+          if (exchangeActionAttemptedThisTick) throw error;
+          continue;
+        } finally {
+          completed = directCloseCompletion?.completed ?? null;
+          directCloseCompletion = null;
+        }
+        if (completed?.outcome === "closed") {
+          fullTakeLatches.delete(record.sourceSignalId);
+          fullTakeProgress.delete(record.sourceSignalId);
+        } else {
+          noteFullTakeProgress(record.sourceSignalId,
+            completed?.detail?.reason ?? result?.reason ?? result?.operation ?? result?.kind);
+        }
+        if (result?.kind === "acted" || exchangeActionAttemptedThisTick) {
+          return result?.kind === "acted" ? result
+            : { kind: "acted", operation: "full_take_close_attempted" };
+        }
+      }
+      return null;
+    } finally {
+      if (typeof recordTiming === "function") {
+        recordTiming("fullTakeExits", performance.now() - startedAt);
+      }
+    }
   }
   if (!["source", FULL_TAKE_5PCT].includes(exitStrategy)) throw new TypeError("Invalid exit strategy");
   if (!store) throw new TypeError("A separate VST store is required");
@@ -14003,6 +14164,9 @@ export function createVstWorker({
         );
         if (sourceResult) return sourceResult;
       }
+      // Latched +5% takes close before any other position or entry work.
+      const fullTakeResult = await processLatchedFullTakes(recordTiming);
+      if (fullTakeResult) return fullTakeResult;
       let stageStarted = performance.now();
       const assessment = await inspectCapabilities(broker, recordTiming);
       recordTiming("capabilities", performance.now() - stageStarted);

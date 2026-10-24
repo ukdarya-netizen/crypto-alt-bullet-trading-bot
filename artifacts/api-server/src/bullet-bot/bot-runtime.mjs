@@ -11,6 +11,7 @@ import { createVstTickLivenessWatchdog, safeTickErrorSummary } from "./vst-tick-
 import { recordVstDiagnostic } from "./vst-diagnostics.mjs";
 import { createVstContractDriftMonitor } from "./vst-contract-drift.mjs";
 import { postTelegramMessage } from "./telegram-client.mjs";
+import { createFullTakeWatchHealth } from "./full-take-watch-health.mjs";
 import { TECHNICAL_TELEGRAM_ALERTS_ENABLED } from "./telegram-trade-outcomes.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstEntryHealthMonitor } from "./vst-entry-health.mjs";
@@ -441,14 +442,25 @@ export async function startBotWorker() {
   // worker, which closes through the normal verified exit lane.
   if (vstWorker && typeof vstWorker.observeFullTakePrices === "function") {
     let fullTakeWatchBusy = false;
+    const fullTakeWatchHealth = createFullTakeWatchHealth({
+      send: async (text) => {
+        if (!vstAlertsEnabled) return;
+        await postTelegramMessage({
+          token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID,
+          fetcher: fetch, text,
+        });
+      },
+    });
     fullTakeWatchTimer = setInterval(async () => {
       if (stopping || fullTakeWatchBusy) return;
       fullTakeWatchBusy = true;
       try {
         const latched = await vstWorker.observeFullTakePrices();
+        await fullTakeWatchHealth.success();
         if (latched > 0) workerTickScheduler?.wakeVst?.();
       } catch (error) {
         process.stderr.write(`Bullet VST full-take watch failed: ${safeTickErrorSummary(error)}\n`);
+        await fullTakeWatchHealth.failure();
       } finally {
         fullTakeWatchBusy = false;
       }

@@ -5682,3 +5682,64 @@ test("fixed five-percent take latches a last-price touch between ticks and close
   assert.equal(closes[0].request.sourceExit.evidence.observedPrice, "105");
   assert.equal(exchange.orders.length, 0);
 });
+
+test("fixed five-percent take: blocked close escalates once, survives restart from the event ledger, then closes", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  let now = NOW;
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => now, true);
+  const KINDS = ["vst_full_take_touched", "vst_full_take_close_delayed", "vst_full_take_close_stuck"];
+  store.listFullTakeEvents = async () => store.data.events
+    .filter(([id, kind]) => KINDS.includes(kind) &&
+      store.data.positions.some((p) => p.sourceSignalId === id && p.status !== "closed"))
+    .map(([sourceSignalId, kind, detail]) => ({ sourceSignalId, kind, detail }));
+  let capabilitiesDown = true;
+  const outage = { ...broker,
+    getCapabilities: async () => {
+      if (capabilitiesDown) throw new Error("bingx_vst_capabilities_unavailable");
+      return broker.getCapabilities();
+    },
+    readLastPrices: async (symbols) => symbols.map((symbol) => ({
+      verified: true, symbol, price: 105, priceDecimal: "105",
+      observedAt: new Date(NOW - 1_000).toISOString(), source: "last_trade",
+    })) };
+  const make = () => createVstWorker({ store, broker: outage, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  const count = (kind) => store.data.events.filter((row) => row[1] === kind).length;
+  let worker = make();
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  await worker.tick();
+  assert.notEqual(store.data.positions[0].status, "closed");
+  assert.equal(count("vst_full_take_close_delayed"), 0, "no notice before the grace period");
+  now = NOW + 91_000;
+  await worker.observeFullTakePrices();
+  await worker.observeFullTakePrices();
+  assert.equal(count("vst_full_take_close_delayed"), 1);
+  const delayed = store.data.events.find((row) => row[1] === "vst_full_take_close_delayed")[2];
+  assert.equal(delayed.reason, "source_exit_capabilities_unavailable");
+  assert.equal(delayed.observedPrice, "105");
+  now = NOW + 15 * 60_000 + 1_000;
+  worker = make(); // restart: in-memory latch and flags are gone
+  await worker.observeFullTakePrices();
+  await worker.observeFullTakePrices();
+  assert.equal(count("vst_full_take_close_delayed"), 1, "restart does not repeat the first notice");
+  assert.equal(count("vst_full_take_close_stuck"), 1);
+  assert.equal(count("vst_full_take_touched"), 1, "a durable touch is not re-latched");
+  capabilitiesDown = false;
+  // The fake exchange stamps every fill/cancel at the fixed NOW, so the
+  // close phase runs at NOW again; the durable latch has no age limit.
+  now = NOW + 2_000;
+  worker = make();
+  for (let i = 0; i < 10 && store.data.positions[0].status !== "closed"; i++) {
+    await worker.tick();
+  }
+  assert.equal(store.data.positions[0].status, "closed", JSON.stringify({
+    intents: store.data.intents, events: store.data.events.slice(-4),
+  }));
+  const closes = store.data.intents.filter(row => row.request.operation === "close_leg" &&
+    row.request.reason === "fixed_price_take_profit_5pct");
+  assert.equal(closes.length, 1);
+  assert.equal(exchange.orders.length, 0);
+  await worker.observeFullTakePrices();
+  assert.equal(count("vst_full_take_close_stuck"), 1, "a closed position is never escalated");
+});
