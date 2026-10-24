@@ -55,3 +55,9 @@ node --test scripts/github-sync.test.mjs
 
 Tests use local disposable Git repositories; they do not touch GitHub, the
 trading database or exchange accounts.
+
+## Working with Claude
+
+Ask Claude to commit and push its changes to `main` in this repository.
+Uncommitted changes inside Claude's own environment cannot be synchronized.
+Changes on another branch need to be merged into `main` first.
