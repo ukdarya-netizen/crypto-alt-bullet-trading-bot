@@ -40,6 +40,8 @@ const FAILURE_REASONS = new Map([
   ["exchange_state_not_verified", "биржа не подтвердила исход операции; результат неизвестен"],
   ["raise_stop_equal_price_noop_confirmed", "цена уже установленного стопа совпала с рассчитанной; повторный ордер не нужен"],
   ["action_fill_unconfirmed", "исполнение операции не подтверждено биржей"],
+  ["entry_result_not_verified",
+    "Вход пока не подтверждён. Бот сверяет заявку с биржей. Повторный ордер не отправляется."],
   ["entry_verification_abandoned_confirmed_open_unprotected",
     "исполнение входа подтверждено, позиция ОТКРЫТА на бирже, но защитный стоп не подтверждён и НЕ будет выставлен автоматически -- бот больше не трогает эту позицию, нужна ручная проверка на BingX VST"],
   ["entry_abandoned_confirmed_flat_account",
@@ -172,6 +174,8 @@ export function formatVstTelegramEvent(event) {
       details.reason === "entry_verification_abandoned_confirmed_open_unprotected" ||
       describeAbandonReason(details.reason) !== null);
   const actionIncludesReason = resolvedWorkerError ||
+    (event.kind === "vst_action_unresolved" &&
+      details.operation === "entry" && details.reason === "entry_result_not_verified") ||
     event.kind === "source_exit_completed" || event.kind === "vst_source_exit_unentered";
   let action;
   switch (event.kind) {
@@ -293,7 +297,9 @@ export function formatVstTelegramEvent(event) {
       break;
     case "vst_action_unresolved": {
       const opText = OPERATION_TEXT.get(details.operation) ?? details.operation;
-      action = details.uncertainty?.classification === "known_uncertainty"
+      action = details.operation === "entry" && details.reason === "entry_result_not_verified"
+        ? FAILURE_REASONS.get("entry_result_not_verified")
+        : details.uncertainty?.classification === "known_uncertainty"
         ? `Известная неопределённость BingX VST (${opText ?? "операция"}). Бот изолировал неподтверждённые эффекты и продолжает ограниченные проверки; повторная отправка не разрешена. Источник сигнала не является доказательством биржевого исполнения.`
         : opText
         ? `Действие на BingX VST не подтверждено (${opText}). Сигнал помечен как «неизвестно»; проверьте позицию и заявки на бирже вручную`

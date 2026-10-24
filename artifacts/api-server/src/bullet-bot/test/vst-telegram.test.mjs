@@ -345,6 +345,14 @@ test("distinguishes a runner max-age close from an ordinary partial close", () =
 });
 
 test("formats an unresolved/ambiguous action with its operation and reason", () => {
+  const pendingEntry = formatVstTelegramEvent(event("vst_action_unresolved", {
+    symbol: "WOOUSDT",
+    detail: { reason: "entry_result_not_verified", operation: "entry" },
+    createdAt: "2026-10-24T15:59:47.411Z",
+  }));
+  assert.match(pendingEntry, /Вход пока не подтверждён\. Бот сверяет заявку с биржей/);
+  assert.match(pendingEntry, /Повторный ордер не отправляется/);
+  assert.doesNotMatch(pendingEntry, /не распознана|вручную|Причина:|открыта|не состоялся/);
   const withOp = formatVstTelegramEvent(event("vst_action_unresolved", {
     detail: { reason: "exchange_state_not_verified", operation: "raise_stop" },
   }));
