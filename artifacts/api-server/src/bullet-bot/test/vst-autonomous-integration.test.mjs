@@ -5721,7 +5721,16 @@ test("fixed five-percent take: blocked close escalates once, survives restart fr
   now = NOW + 15 * 60_000 + 1_000;
   worker = make(); // restart: in-memory latch and flags are gone
   await worker.observeFullTakePrices();
+  assert.equal(count("vst_full_take_close_stuck"), 0,
+    "after a restart nothing is escalated before this process tries to close");
+  // Close attempt with capabilities still down. Later tick stages may refuse
+  // the fake exchange's fixed-NOW timestamps at this clock; the lane runs first.
+  await worker.tick().catch(() => {});
   await worker.observeFullTakePrices();
+  await worker.observeFullTakePrices();
+  const progress = store.data.events.filter((row) => row[1] === "vst_full_take_close_progress");
+  assert.ok(progress.length >= 1);
+  assert.equal(progress.at(-1)[2].reason, "source_exit_capabilities_unavailable");
   assert.equal(count("vst_full_take_close_delayed"), 1, "restart does not repeat the first notice");
   assert.equal(count("vst_full_take_close_stuck"), 1);
   assert.equal(count("vst_full_take_touched"), 1, "a durable touch is not re-latched");

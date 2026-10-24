@@ -1487,6 +1487,11 @@ export function createVstWorker({
   const fullTakeLatches = new Map();
   // sourceSignalId -> { lastReason, delayedSent, stuckSent }
   const fullTakeProgress = new Map();
+  // A notice must not be raised before this process has tried to close
+  // (e.g. right after a restart); a hung tick still escalates after grace.
+  const fullTakeProcessStartedAt = Number(clock());
+  const FULL_TAKE_STARTUP_GRACE_MS = 180_000;
+  const fullTakeAttempted = new Set();
 
   function fullTakeProgressFor(sourceSignalId) {
     let progress = fullTakeProgress.get(sourceSignalId);
@@ -1543,8 +1548,24 @@ export function createVstWorker({
     }
   }
 
-  function noteFullTakeProgress(sourceSignalId, reason) {
-    if (typeof reason === "string" && reason) fullTakeProgressFor(sourceSignalId).lastReason = reason;
+  // Every change of the reason a latched close did not complete is written
+  // to the ledger (not Telegram) and the log, so a stuck take is diagnosable.
+  async function noteFullTakeProgress(record, reason, extra = {}) {
+    if (typeof reason !== "string" || !reason) return;
+    const progress = fullTakeProgressFor(record.sourceSignalId);
+    if (progress.lastReason === reason) return;
+    progress.lastReason = reason;
+    const detail = { symbol: record.snapshot?.symbol ?? record.symbol, reason,
+      positionStatus: record.status ?? null,
+      ...Object.fromEntries(Object.entries(extra).filter(([, v]) =>
+        typeof v === "string" && /^[A-Za-z0-9_:.-]{1,160}$/.test(v))) };
+    try { await store.recordEvent?.(record.sourceSignalId, "vst_full_take_close_progress", detail); }
+    catch (error) {
+      recordVstDiagnostic(error, { stage: "fullTakeExits", operation: "record_full_take_progress",
+        symbol: detail.symbol, sourceSignalId: record.sourceSignalId });
+    }
+    try { process.stdout.write(`Bullet VST full-take close: ${JSON.stringify({ sourceSignalId: record.sourceSignalId, ...detail })}\n`); }
+    catch {}
   }
 
   // Durable, once-only notices for a touched take that has not closed.
@@ -1556,6 +1577,8 @@ export function createVstWorker({
       if (!evidence) continue;
       const age = now - Date.parse(evidence.observedAt);
       if (!Number.isFinite(age)) continue;
+      if (!fullTakeAttempted.has(record.sourceSignalId) &&
+          now - fullTakeProcessStartedAt < FULL_TAKE_STARTUP_GRACE_MS) continue;
       const progress = fullTakeProgressFor(record.sourceSignalId);
       const stage = age >= FULL_TAKE_STUCK_MS && !progress.stuckSent ? "stuck"
         : age >= FULL_TAKE_DELAYED_MS && !progress.delayedSent && !progress.stuckSent ? "delayed"
@@ -1639,15 +1662,17 @@ export function createVstWorker({
         const evidence = latchedFullTakeEvidence(record);
         if (!evidence) continue;
         const symbol = record.snapshot?.symbol;
+        fullTakeAttempted.add(record.sourceSignalId);
         if (sourceExitBlockedSymbols.has(normalizeSymbolKey(symbol))) {
-          noteFullTakeProgress(record.sourceSignalId, "source_exit_blocked_for_symbol");
+          await noteFullTakeProgress(record, "source_exit_blocked_for_symbol",
+            { blockingReason: sourceExitBlockedRows.get(normalizeSymbolKey(symbol))?.reason });
           continue;
         }
         if (capabilities === undefined) {
           try { capabilities = await broker.getCapabilities(); } catch { capabilities = null; }
         }
         if (!capabilities) {
-          noteFullTakeProgress(record.sourceSignalId, "source_exit_capabilities_unavailable");
+          await noteFullTakeProgress(record, "source_exit_capabilities_unavailable");
           continue;
         }
         const requestId = fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice);
@@ -1662,7 +1687,8 @@ export function createVstWorker({
         } catch (error) {
           recordVstDiagnostic(error, { stage: "fullTakeExits", operation: "full_take_close",
             symbol, sourceSignalId: record.sourceSignalId });
-          noteFullTakeProgress(record.sourceSignalId, "full_take_close_exception");
+          await noteFullTakeProgress(record, "full_take_close_exception",
+            { error: error instanceof Error ? error.message.slice(0, 160) : undefined });
           if (exchangeActionAttemptedThisTick) throw error;
           continue;
         } finally {
@@ -1673,8 +1699,12 @@ export function createVstWorker({
           fullTakeLatches.delete(record.sourceSignalId);
           fullTakeProgress.delete(record.sourceSignalId);
         } else {
-          noteFullTakeProgress(record.sourceSignalId,
-            completed?.detail?.reason ?? result?.reason ?? result?.operation ?? result?.kind);
+          await noteFullTakeProgress(record,
+            completed?.detail?.reason ?? result?.reason ?? result?.operation ?? result?.kind,
+            { kind: result?.kind, operation: result?.operation,
+              blockingSourceSignalId: result?.blockingSourceSignalId,
+              blockingOperation: result?.blockingOperation ?? undefined,
+              blockingClientOrderId: result?.blockingClientOrderId ?? undefined });
         }
         if (result?.kind === "acted" || exchangeActionAttemptedThisTick) {
           return result?.kind === "acted" ? result
@@ -13515,7 +13545,9 @@ export function createVstWorker({
         if (prerequisiteAttempts.has(attemptKey)) {
           return { kind: "blocked", reason: "source_exit_same_symbol_intent_unresolved",
             sourceSignalId: row.sourceSignalId, symbol: row.symbol,
-            blockingSourceSignalId: sameSymbolUnresolved.sourceSignalId };
+            blockingSourceSignalId: sameSymbolUnresolved.sourceSignalId,
+            blockingOperation: sameSymbolUnresolved.request?.operation ?? null,
+            blockingClientOrderId: sameSymbolUnresolved.clientOrderId ?? null };
         }
         prerequisiteAttempts.add(attemptKey);
         const assessment = capabilities ??
@@ -13533,7 +13565,9 @@ export function createVstWorker({
               sourceSignalId: row.sourceSignalId, symbol: row.symbol }
           : { kind: "blocked", reason: "source_exit_same_symbol_intent_unresolved",
               sourceSignalId: row.sourceSignalId, symbol: row.symbol,
-              blockingSourceSignalId: sameSymbolUnresolved.sourceSignalId };
+              blockingSourceSignalId: sameSymbolUnresolved.sourceSignalId,
+            blockingOperation: sameSymbolUnresolved.request?.operation ?? null,
+            blockingClientOrderId: sameSymbolUnresolved.clientOrderId ?? null };
       }
       const candidateExists = typeof store.hasPendingSourceExitRequest === "function" &&
         await store.hasPendingSourceExitRequest(row.sourceSignalId);
@@ -13612,7 +13646,9 @@ export function createVstWorker({
       if (prerequisiteAttempts.has(attemptKey)) {
         return { kind: "blocked", reason: "source_exit_same_symbol_intent_unresolved",
           sourceSignalId: row.sourceSignalId, symbol: row.symbol,
-          blockingSourceSignalId: sameSymbolConflict.sourceSignalId };
+          blockingSourceSignalId: sameSymbolConflict.sourceSignalId,
+            blockingOperation: sameSymbolConflict.request?.operation ?? null,
+            blockingClientOrderId: sameSymbolConflict.clientOrderId ?? null };
       }
       prerequisiteAttempts.add(attemptKey);
       let prerequisite;
@@ -13638,7 +13674,9 @@ export function createVstWorker({
       }
       return { kind: "blocked", reason: "source_exit_same_symbol_intent_unresolved",
         sourceSignalId: row.sourceSignalId, symbol: row.symbol,
-        blockingSourceSignalId: sameSymbolConflict.sourceSignalId };
+        blockingSourceSignalId: sameSymbolConflict.sourceSignalId,
+            blockingOperation: sameSymbolConflict.request?.operation ?? null,
+            blockingClientOrderId: sameSymbolConflict.clientOrderId ?? null };
     }
     if (state.sourceExitCleanup?.requestId === row.requestId &&
         state.split?.stage === "flat_cleanup_pending") {
