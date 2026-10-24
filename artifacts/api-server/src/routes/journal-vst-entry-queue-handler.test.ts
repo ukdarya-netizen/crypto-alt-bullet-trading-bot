@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Request, Response } from "express";
 import { createJournalVstEntryQueueHandler } from "./journal-vst-entry-queue-handler";
+import { buildVstEntryLatency } from "../lib/vst-entry-latency.mjs";
 
 function responseDouble() {
   const result: {
@@ -54,4 +55,20 @@ test("queue handler validates and returns the generated success contract", async
     hasMore: false,
     entries: [],
   });
+});
+
+test("queue contract includes latency cohorts and fails explicitly if their read fails", async () => {
+  const queue = { asOf: "2026-01-01T00:00:00Z", total: 0, hasMore: false, entries: [] };
+  const latency = buildVstEntryLatency([], { asOf: queue.asOf, since: queue.asOf });
+  const { result, response } = responseDouble();
+  await createJournalVstEntryQueueHandler(async () => queue, async () => latency)(
+    {} as Request, response, () => {});
+  assert.equal(result.status, 200);
+  assert.equal((result.body as { latency: { cohorts: unknown[] } }).latency.cohorts.length, 3);
+  const failed = responseDouble();
+  await createJournalVstEntryQueueHandler(async () => queue, async () => {
+    throw new Error("secret");
+  })({} as Request, failed.response, () => {});
+  assert.equal(failed.result.status, 503);
+  assert.doesNotMatch(JSON.stringify(failed.result.body), /secret/);
 });

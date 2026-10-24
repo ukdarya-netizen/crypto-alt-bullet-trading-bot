@@ -9364,7 +9364,7 @@ export function createVstBroker({
 
   async function performIntentUnclassified({
     clientOrderId, phase, request, mutationContext, onSubmission,
-    onEntryReprice, onEntryTransportReady,
+    onEntryReprice, onEntryTransportReady, onEntryTiming,
   }) {
     const symbol = request?.symbol;
     assertSymbol(symbol);
@@ -9507,6 +9507,7 @@ export function createVstBroker({
           refreshSizing: request.refreshSizing,
           onReprice: onEntryReprice,
           onTransportReady: onEntryTransportReady,
+          onEntryTiming,
         } : {}),
       });
       return;

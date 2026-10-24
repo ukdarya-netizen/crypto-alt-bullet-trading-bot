@@ -1716,6 +1716,11 @@ export function createVstWorker({
               event: "entry_transport_ready", ...detail,
             });
           },
+          onEntryTiming: async (detail) => {
+            await store.recordEvent?.(signalId, "vst_entry_latency", {
+              ...detail, clientOrderId,
+            });
+          },
         } : {}),
       });
       if (submission?.exchangeOrderId !== undefined) {

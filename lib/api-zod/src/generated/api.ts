@@ -763,6 +763,39 @@ export const GetJournalVstEntryQueueResponse = zod.object({
   "asOf": zod.coerce.date(),
   "total": zod.number().int(),
   "hasMore": zod.boolean(),
+  "latency": zod.object({
+  "asOf": zod.coerce.date(),
+  "since": zod.coerce.date(),
+  "total": zod.number().int(),
+  "hasMore": zod.boolean(),
+  "cohorts": zod.array(zod.object({
+  "cohort": zod.enum(['measured', 'historical', 'not_attempted']),
+  "count": zod.number().int(),
+  "timedCount": zod.number().int(),
+  "p50Ms": zod.number().nullable(),
+  "p95Ms": zod.number().nullable(),
+  "refusals": zod.number().int(),
+  "freshnessRefusals": zod.number().int(),
+  "freshnessRefusalPercent": zod.number().nullable()
+})),
+  "entries": zod.array(zod.object({
+  "sourceSignalId": zod.string(),
+  "symbol": zod.string().nullable(),
+  "status": zod.string(),
+  "cohort": zod.enum(['measured', 'historical', 'not_attempted']),
+  "receivedAt": zod.coerce.date().nullable(),
+  "transportAt": zod.coerce.date().nullable(),
+  "receiptToTransportMs": zod.number().nullable(),
+  "receiptToNativeAttemptMs": zod.number().nullable(),
+  "marginModeMs": zod.number().nullable(),
+  "leverageMs": zod.number().nullable(),
+  "nativeChecksMs": zod.number().nullable(),
+  "finalPriceMs": zod.number().nullable(),
+  "pacingMs": zod.number().nullable(),
+  "refusedBeforeTransport": zod.boolean(),
+  "freshnessRefusal": zod.boolean()
+}))
+}).optional(),
   "entries": zod.array(zod.object({
   "sourceSignalId": zod.string(),
   "symbol": zod.string().nullable(),

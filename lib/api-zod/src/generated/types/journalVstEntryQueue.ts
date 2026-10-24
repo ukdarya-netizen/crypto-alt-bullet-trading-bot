@@ -5,11 +5,13 @@
  * Signal intake and safety controls for the isolated trading executor.
  * OpenAPI spec version: 0.1.0
  */
+import type { JournalVstEntryLatency } from './journalVstEntryLatency';
 import type { JournalVstEntryQueueItem } from './journalVstEntryQueueItem';
 
 export interface JournalVstEntryQueue {
   asOf: Date;
   total: number;
   hasMore: boolean;
+  latency?: JournalVstEntryLatency;
   entries: JournalVstEntryQueueItem[];
 }

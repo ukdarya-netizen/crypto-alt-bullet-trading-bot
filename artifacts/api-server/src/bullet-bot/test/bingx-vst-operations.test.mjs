@@ -31,6 +31,7 @@ function freshEntryAttempt(extra = {}) {
 
 test("a VST entry requests priority only after fresh checks and persists sizing before transport", async () => {
   const slots = [];
+  const measurements = [];
   let repriced = false;
   const f = fixture({
     symbol: "DOGE-USDT", dualSidePosition: true, longLeverage: 10, shortLeverage: 3,
@@ -44,13 +45,18 @@ test("a VST entry requests priority only after fresh checks and persists sizing 
   });
   await f.api.placeVstAutomatedLong(freshEntryAttempt({
     onReprice: async () => { repriced = true; },
+    onEntryTiming: (detail) => { measurements.push(detail); },
   }));
+  assert.deepEqual(measurements.map((d) => d.boundary), ["started", "transport_started"]);
+  assert.equal(measurements[1].version, "entry-latency-v1");
+  assert.ok(measurements[1].transportStartedAtMs >= measurements[1].checksCompletedAtMs);
   assert.equal(slots.filter(slot => slot?.priority).length, 1);
   assert.equal(f.calls.filter(({ url, options }) =>
     url.pathname === orderPath && options.method === "POST").length, 1);
 });
 
 test("pacing expiry is a proven no-transport refusal, with no POST or automatic resubmission", async () => {
+  const measurements = [];
   const time = { now: 1700000000000 };
   const f = fixture({
     symbol: "DOGE-USDT", dualSidePosition: true, longLeverage: 10, shortLeverage: 3,
@@ -66,6 +72,7 @@ test("pacing expiry is a proven no-transport refusal, with no POST or automatic 
   const attempt = freshEntryAttempt({
     onReprice: async () => {},
     onTransportReady: async () => { transportCalls++; },
+    onEntryTiming: (detail) => { measurements.push(detail); },
   });
   await assert.rejects(f.api.placeVstAutomatedLong(attempt), error => {
     assert.equal(error.transportStage, "pre_transport");
@@ -74,8 +81,28 @@ test("pacing expiry is a proven no-transport refusal, with no POST or automatic 
     return true;
   });
   assert.equal(transportCalls, 0);
+  assert.deepEqual(measurements.map((d) => d.boundary), ["started", "refused_before_transport"]);
+  assert.equal(measurements[1].preSignReason, "final_pre_sign_pacing_expired");
+  assert.equal(measurements[1].refusedAtMs - measurements[1].checksCompletedAtMs, 2001);
   assert.equal(f.calls.some(({ options }) => options.method === "POST"), false);
   await assert.rejects(f.api.placeVstAutomatedLong(attempt), /already submitted/);
+});
+
+test("failed or unfinished latency writes never block or repeat the native order", async () => {
+  for (const onEntryTiming of [
+    () => { throw new Error("telemetry write failed"); },
+    () => Promise.reject(new Error("telemetry unavailable")),
+    () => new Promise(() => {}),
+  ]) {
+    const f = fixture({
+      symbol: "DOGE-USDT", dualSidePosition: true, longLeverage: 10, shortLeverage: 3,
+    });
+    await f.api.placeVstAutomatedLong(freshEntryAttempt({
+      onReprice: async () => {}, onEntryTiming,
+    }));
+    assert.equal(f.calls.filter(({ url, options }) =>
+      url.pathname === orderPath && options.method === "POST").length, 1);
+  }
 });
 
 test("native fresh sizing shrinks quantity after drift, persists before POST, and keeps a single risk preflight", async () => {

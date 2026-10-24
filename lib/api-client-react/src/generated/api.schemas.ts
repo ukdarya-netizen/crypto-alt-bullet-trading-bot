@@ -603,6 +603,75 @@ export interface JournalBot {
   recentClosedPositions: JournalBotRecentClosedPositionsItem[];
 }
 
+export type JournalVstEntryLatencyCohortCohort = typeof JournalVstEntryLatencyCohortCohort[keyof typeof JournalVstEntryLatencyCohortCohort];
+
+
+export const JournalVstEntryLatencyCohortCohort = {
+  measured: 'measured',
+  historical: 'historical',
+  not_attempted: 'not_attempted',
+} as const;
+
+export interface JournalVstEntryLatencyCohort {
+  cohort: JournalVstEntryLatencyCohortCohort;
+  count: number;
+  timedCount: number;
+  /** @nullable */
+  p50Ms: number | null;
+  /** @nullable */
+  p95Ms: number | null;
+  refusals: number;
+  freshnessRefusals: number;
+  /** @nullable */
+  freshnessRefusalPercent: number | null;
+}
+
+export type JournalVstEntryLatencyItemCohort = typeof JournalVstEntryLatencyItemCohort[keyof typeof JournalVstEntryLatencyItemCohort];
+
+
+export const JournalVstEntryLatencyItemCohort = {
+  measured: 'measured',
+  historical: 'historical',
+  not_attempted: 'not_attempted',
+} as const;
+
+export interface JournalVstEntryLatencyItem {
+  sourceSignalId: string;
+  /** @nullable */
+  symbol: string | null;
+  status: string;
+  cohort: JournalVstEntryLatencyItemCohort;
+  /** @nullable */
+  receivedAt: string | null;
+  /** @nullable */
+  transportAt: string | null;
+  /** @nullable */
+  receiptToTransportMs: number | null;
+  /** @nullable */
+  receiptToNativeAttemptMs: number | null;
+  /** @nullable */
+  marginModeMs: number | null;
+  /** @nullable */
+  leverageMs: number | null;
+  /** @nullable */
+  nativeChecksMs: number | null;
+  /** @nullable */
+  finalPriceMs: number | null;
+  /** @nullable */
+  pacingMs: number | null;
+  refusedBeforeTransport: boolean;
+  freshnessRefusal: boolean;
+}
+
+export interface JournalVstEntryLatency {
+  asOf: string;
+  since: string;
+  total: number;
+  hasMore: boolean;
+  cohorts: JournalVstEntryLatencyCohort[];
+  entries: JournalVstEntryLatencyItem[];
+}
+
 /**
  * Safe projection of a received signal, not a source ACTIVE card. Null timings are unknown, never zero.
  */
@@ -645,6 +714,7 @@ export interface JournalVstEntryQueue {
   asOf: string;
   total: number;
   hasMore: boolean;
+  latency?: JournalVstEntryLatency;
   entries: JournalVstEntryQueueItem[];
 }
 

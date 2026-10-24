@@ -1215,10 +1215,59 @@ components:
         asOf: { type: string, format: date-time }
         total: { type: integer }
         hasMore: { type: boolean }
+        latency:
+          $ref: "#/components/schemas/JournalVstEntryLatency"
         entries:
           type: array
           items:
             $ref: "#/components/schemas/JournalVstEntryQueueItem"
+    JournalVstEntryLatency:
+      type: object
+      required: [asOf, since, total, hasMore, cohorts, entries]
+      properties:
+        asOf: { type: string, format: date-time }
+        since: { type: string, format: date-time }
+        total: { type: integer }
+        hasMore: { type: boolean }
+        cohorts:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalVstEntryLatencyCohort"
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalVstEntryLatencyItem"
+    JournalVstEntryLatencyCohort:
+      type: object
+      required: [cohort, count, timedCount, p50Ms, p95Ms, refusals, freshnessRefusals, freshnessRefusalPercent]
+      properties:
+        cohort: { type: string, enum: [measured, historical, not_attempted] }
+        count: { type: integer }
+        timedCount: { type: integer }
+        p50Ms: { type: ["number", "null"] }
+        p95Ms: { type: ["number", "null"] }
+        refusals: { type: integer }
+        freshnessRefusals: { type: integer }
+        freshnessRefusalPercent: { type: ["number", "null"] }
+    JournalVstEntryLatencyItem:
+      type: object
+      required: [sourceSignalId, symbol, status, cohort, receivedAt, transportAt, receiptToTransportMs, receiptToNativeAttemptMs, marginModeMs, leverageMs, nativeChecksMs, finalPriceMs, pacingMs, refusedBeforeTransport, freshnessRefusal]
+      properties:
+        sourceSignalId: { type: string }
+        symbol: { type: ["string", "null"] }
+        status: { type: string }
+        cohort: { type: string, enum: [measured, historical, not_attempted] }
+        receivedAt: { type: ["string", "null"], format: date-time }
+        transportAt: { type: ["string", "null"], format: date-time }
+        receiptToTransportMs: { type: ["number", "null"] }
+        receiptToNativeAttemptMs: { type: ["number", "null"] }
+        marginModeMs: { type: ["number", "null"] }
+        leverageMs: { type: ["number", "null"] }
+        nativeChecksMs: { type: ["number", "null"] }
+        finalPriceMs: { type: ["number", "null"] }
+        pacingMs: { type: ["number", "null"] }
+        refusedBeforeTransport: { type: boolean }
+        freshnessRefusal: { type: boolean }
     JournalVstEntryQueueItem:
       type: object
       description: Safe projection of a received signal, not a source ACTIVE card. Null timings are unknown, never zero.

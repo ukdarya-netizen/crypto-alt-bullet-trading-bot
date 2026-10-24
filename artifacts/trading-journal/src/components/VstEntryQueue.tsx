@@ -3,6 +3,7 @@ import { getGetJournalVstEntryQueueQueryKey, useGetJournalVstEntryQueue } from "
 import type { JournalVstEntryQueueItem } from "@workspace/api-client-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate } from "@/lib/utils";
+import { VstEntryLatency } from "./VstEntryLatency";
 
 const STAGE_LABELS: Record<string, string> = {
   queued: "В очереди", preparing: "Подготовка", prepared: "Подготовлен",
@@ -132,6 +133,7 @@ export function VstEntryQueue() {
               Не удалось обновить очередь — показаны данные на {when(data.asOf)}; они могли устареть. {retry}
             </div>
           )}
+          {data.latency && <VstEntryLatency data={data.latency} />}
           {data.entries.length === 0 ? (
             <div className="border-t border-border px-5 py-10 text-center" data-testid="empty-vst-queue">
               <p className="font-medium">{data.total === 0 ? "В очереди входов сейчас ничего нет" : `Список пуст, но всего в очереди ${data.total}`}</p>

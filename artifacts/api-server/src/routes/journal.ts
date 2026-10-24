@@ -70,6 +70,7 @@ import { auditLiveFunding } from "../lib/live-funding-audit";
 import { paperPositionMargin } from "../lib/paper-position-margin";
 // @ts-expect-error Read-only VST ledger queue projection is JavaScript.
 import { readVstEntryQueue } from "../lib/vst-entry-queue.mjs";
+import { readVstEntryLatency } from "../lib/vst-entry-latency.mjs";
 import { createJournalVstEntryQueueHandler } from "./journal-vst-entry-queue-handler";
 import { createJournalBotHealthHandler } from "./journal-bot-health-handler";
 import { buildBotHealth, createLedgerHealthReader } from "../lib/bot-health";
@@ -252,7 +253,8 @@ router.get("/journal/bot-health", createJournalBotHealthHandler(async () =>
   })));
 
 router.get("/journal/vst-entry-queue",
-  createJournalVstEntryQueueHandler(() => readVstEntryQueue(dbPool)));
+  createJournalVstEntryQueueHandler(
+    () => readVstEntryQueue(dbPool), () => readVstEntryLatency(dbPool)));
 
 router.get("/journal/overview", async (_req, res): Promise<void> => {
   res.setHeader("Cache-Control", "no-store");

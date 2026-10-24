@@ -2036,8 +2036,25 @@ export function createBingXLiveApi({
     signalAt,
     approvedTopUpMargin = null,
     policy = VST_AUTOMATED_LONG_POLICY,
-    refreshSizing = null, onReprice, onTransportReady,
+    refreshSizing = null, onReprice, onTransportReady, onEntryTiming,
   }) {
+    const attemptStartedAtMs = Number(clock());
+    let finalPriceStartedAtMs, finalPriceCompletedAtMs, checksCompletedAtMs;
+    let freshnessExpired = false;
+    const emitEntryTiming = (detail) => {
+      if (typeof onEntryTiming !== "function") return;
+      // Never await observability on the order's freshness-critical path.
+      try {
+        Promise.resolve(onEntryTiming({
+          version: "entry-latency-v1", clientOrderId, attemptStartedAtMs, ...detail,
+        })).catch((error) => {
+          recordVstDiagnostic(error, { stage: "entry_latency_telemetry" });
+        });
+      } catch (error) {
+        recordVstDiagnostic(error, { stage: "entry_latency_telemetry" });
+      }
+    };
+    emitEntryTiming({ boundary: "started" });
     const name = symbolName(symbol);
     if (environment !== "vst") {
       throw new BingXLiveApiError("VST automated LONG entry is unavailable outside VST");
@@ -2218,6 +2235,7 @@ export function createBingXLiveApi({
           }
         }
         let quote;
+        finalPriceStartedAtMs = Number(clock());
         try {
           quote = await getFreshVstAsk(symbol);
         } catch (error) {
@@ -2230,6 +2248,7 @@ export function createBingXLiveApi({
           }
           throw quoteError;
         }
+        finalPriceCompletedAtMs = Number(clock());
         finalQuoteTimestamp = quote.timestamp;
         if (quote.ask > Number(price)) {
           throw new BingXLiveApiError("VST final ask exceeds the maximum entry price", {
@@ -2241,6 +2260,7 @@ export function createBingXLiveApi({
             preSignReason: "final_budget_exceeded",
           });
         }
+        checksCompletedAtMs = Number(clock());
       },
       beforeTransport: async () => {
         const signalTime = Date.parse(signalAt);
@@ -2248,6 +2268,7 @@ export function createBingXLiveApi({
         if (!Number.isFinite(signalTime) || !Number.isFinite(now) ||
             now - signalTime > VST_SIGNAL_MAX_AGE_MS ||
             now - signalTime < -VST_SIGNAL_FUTURE_TOLERANCE_MS) {
+          freshnessExpired = now - signalTime > VST_SIGNAL_MAX_AGE_MS;
           const error = new BingXLiveApiError("VST entry signal expired before submission", {
             preSignReason: "signal_expired",
           });
@@ -2255,6 +2276,7 @@ export function createBingXLiveApi({
         }
         const quoteAge = now - Number(finalQuoteTimestamp);
         if (!Number.isFinite(quoteAge) || quoteAge < -2_000 || quoteAge > 10_000) {
+          freshnessExpired = quoteAge > 10_000;
           throw new BingXLiveApiError("VST final ask became stale while waiting for request pacing", {
             preSignReason: "final_quote_unavailable_or_stale",
           });
@@ -2263,11 +2285,13 @@ export function createBingXLiveApi({
           const sizingAgeAtSubmitMs = now - refreshedSizing.calculatedAtMs;
           if (!Number.isFinite(sizingAgeAtSubmitMs) || sizingAgeAtSubmitMs < 0 ||
               sizingAgeAtSubmitMs > refreshSizing.maxQuoteAgeMs) {
+            freshnessExpired = sizingAgeAtSubmitMs > refreshSizing.maxQuoteAgeMs;
             throw new BingXLiveApiError("VST sizing became stale before submission", {
               preSignReason: "final_quote_unavailable_or_stale",
             });
           }
           if (now - refreshedSizing.quoteObservedAtMs > refreshSizing.maxQuoteAgeMs) {
+            freshnessExpired = true;
             throw new BingXLiveApiError("VST sizing source quote became stale before submission", {
               preSignReason: "final_quote_unavailable_or_stale",
             });
@@ -2275,6 +2299,11 @@ export function createBingXLiveApi({
         }
       },
       onTransportStart: () => {
+        const transportStartedAtMs = Number(clock());
+        emitEntryTiming({
+          boundary: "transport_started", transportStartedAtMs,
+          finalPriceStartedAtMs, finalPriceCompletedAtMs, checksCompletedAtMs,
+        });
         if (!refreshedSizing || typeof onTransportReady !== "function") return;
         const at = Number(clock());
         // Observability must not add another DB round trip between the
@@ -2288,6 +2317,18 @@ export function createBingXLiveApi({
           recordVstDiagnostic(error, { stage: "entry_transport_telemetry", symbol: name });
         });
       },
+    }).catch((error) => {
+      if (error?.transportStage === "pre_transport") {
+        emitEntryTiming({
+          boundary: "refused_before_transport", refusedAtMs: Number(clock()),
+          finalPriceStartedAtMs, finalPriceCompletedAtMs, checksCompletedAtMs,
+          freshnessExpired: freshnessExpired ||
+            error?.preSignReason === "final_pre_sign_pacing_expired",
+          preSignReason: ALLOWED_VST_PRE_SIGN_REASONS.has(error?.preSignReason)
+            ? error.preSignReason : null,
+        });
+      }
+      throw error;
     });
     // VST MARKET acknowledgements can use data.order.orderId. Decode every
     // supplied alias losslessly and reject contradictions; this is only an
