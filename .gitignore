@@ -48,7 +48,7 @@ Thumbs.db
 .cache/
 .local/
 
-# Private/runtime materials excluded from this source export
+# Private/runtime materials excluded from GitHub source synchronization
 .env
 .env.*
 !.env.example
