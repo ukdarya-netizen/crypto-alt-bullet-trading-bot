@@ -25,6 +25,10 @@ args = "Trading Executor Worker"
 task = "workflow.run"
 args = "api-codegen-build"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "GitHub Source Sync"
+
 [[workflows.workflow]]
 name = "Trading Executor Worker"
 author = "agent"
@@ -46,6 +50,17 @@ args = "pnpm --filter @workspace/api-spec run check:codegen-build && git diff --
 
 [workflows.workflow.metadata]
 isValidation = true
+
+[[workflows.workflow]]
+name = "GitHub Source Sync"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "node scripts/github-sync.mjs --watch"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [agent]
 stack = "PNPM_WORKSPACE"
