@@ -9,6 +9,7 @@ import {
   createSourceDiscrepancyAlerter,
   formatSourceSyncLivenessAlert,
   createSourceSyncLivenessAlerter,
+  isUserFacingVstEvent,
 } from "../vst-telegram.mjs";
 
 test("unlinked stop protection adoption does not claim a successful write or replay", () => {
@@ -24,6 +25,48 @@ test("unlinked stop protection adoption does not claim a successful write or rep
   assert.doesNotMatch(text, /Стоп перенесён|Позиция закрыта/);
 });
 import { safeTickErrorSummary } from "../vst-tick-watchdog.mjs";
+
+test("OFC non-execution proof reports a resolved non-entry, not a manual-check alarm", () => {
+  const text = formatVstTelegramEvent(event("vst_worker_error", {
+    symbol: "OFCUSDT",
+    detail: { reason: "entry_unverified_symbol_flat_after_timeout" },
+  }));
+  assert.match(text, /Вход не состоялся/);
+  assert.match(text, /проверены заявка, история сделок, позиции и активные ордера/);
+  assert.match(text, /повторного входа не будет/);
+  assert.match(text, /Ваших действий не требуется/);
+  assert.doesNotMatch(text, /Ошибка обработки|проверьте|не доказывает|Причина:|журнал/i);
+  const uncertain = formatVstTelegramEvent(event("vst_worker_error", {
+    detail: { reason: "exchange_state_not_verified" },
+  }));
+  assert.match(uncertain, /Проверьте позицию/);
+  assert.doesNotMatch(uncertain, /Вход не состоялся|Ваших действий не требуется/);
+});
+
+test("source close messages distinguish cancellation, exchange closure and unknown outcome", () => {
+  const cancelled = formatVstTelegramEvent(event("source_exit_completed", {
+    detail: { outcome: "cancelled_unentered", reason: "source_closed" },
+  }));
+  assert.match(cancelled, /Подтверждённого входа нет; новый вход отменён/);
+  assert.match(cancelled, /Ордер на закрытие не отправлялся/);
+  assert.doesNotMatch(cancelled, /Позиция закрыта|Причина:|журнал|source exit/);
+  const closed = formatVstTelegramEvent(event("source_exit_completed", {
+    detail: { outcome: "closed", reason: "source_closed" },
+  }));
+  assert.match(closed, /Позиция закрыта на BingX VST по команде сигнального бота/);
+  const historical = formatVstTelegramEvent(event("source_exit_completed", {
+    detail: { outcome: "closed", detail: { closureOrigin: "already_committed_exchange_history" } },
+  }));
+  assert.match(historical, /уже подтверждённо закрыта/);
+  assert.match(historical, /Новых торговых заявок не отправлялось/);
+  const unknown = formatVstTelegramEvent(event("source_exit_completed", {
+    detail: { outcome: "future-outcome", reason: "private-token-do-not-send" },
+  }));
+  assert.match(unknown, /Закрытие позиции не подтверждено/);
+  assert.doesNotMatch(unknown, /private-token|журнал/);
+  assert.equal(isUserFacingVstEvent({ kind: "vst_source_exit_unentered" }), false);
+  assert.equal(isUserFacingVstEvent({ kind: "source_exit_completed" }), true);
+});
 
 test("temporary market-read alert describes a data refusal, not a missing stop or manual intervention", () => {
   const text = formatVstBlockedAlert({
@@ -179,14 +222,14 @@ test("falls back to a generic message instead of dropping an unlisted event kind
   // one this formatter has no bespoke, reviewed wording for yet.
   const generic = formatVstTelegramEvent(event("vst_symbol_currently_offline"));
   assert.match(generic, /^BingX VST · ETHUSDT\n/);
-  assert.match(generic, /symbol currently offline/);
+  assert.match(generic, /нераспознанное событие/);
   assert.doesNotMatch(generic, /^BingX VST · ETHUSDT\n$/);
 
   const withReason = formatVstTelegramEvent(event("vst_order_rejected", {
     detail: { reason: "some_future_broker_reason" },
   }));
-  assert.match(withReason, /order rejected/);
-  assert.match(withReason, /Причина: подробности в журнале VST/);
+  assert.match(withReason, /нераспознанное событие/);
+  assert.match(withReason, /Причина: не распознана; результат сделки не подтверждён/);
 });
 
 test("signal-less events use a generic message without exposing kind or private details", () => {
@@ -198,7 +241,7 @@ test("signal-less events use a generic message without exposing kind or private 
       outcome: { accountId: "private-account-id" },
     }));
     assert.match(message, /^BingX VST · системное событие без сигнала/);
-    assert.match(message, /записано в журнал VST/);
+    assert.match(message, /Не удалось определить инструмент/);
     assert.doesNotMatch(message,
       /database-password|secret-do-not-send|private-account-id|future_kind/);
   }
@@ -209,7 +252,7 @@ test("formats a signal status change with Russian status labels", () => {
     detail: { from: "planning", to: "rejected", reason: "policy_rejected" }, outcome: {},
   }));
   assert.match(changed, /Статус сигнала изменён: планируется → отклонён/);
-  assert.match(changed, /Причина: подробности в журнале VST/);
+  assert.match(changed, /Причина: сигнал не прошёл проверку торговых правил/);
 
   const unknownStatus = formatVstTelegramEvent(event("vst_signal_status_changed", {
     detail: { from: "pending", to: "some_future_status" }, outcome: {},
@@ -713,7 +756,8 @@ test("a failed oldest event cools down independently and is retried after newer 
   const sentIds = new Set();
   const rows = ["14", "15", "16"].map((id) => ({
     id, kind: `vst_event_${id}`, detail: {},
-    body: { symbol: "BTCUSDT" }, request: null, outcome: null,
+    body: { symbol: { "14": "BTCUSDT", "15": "ETHUSDT", "16": "DOGEUSDT" }[id] },
+    request: null, outcome: null,
     created_at: new Date("2026-09-27T08:00:00Z"),
   }));
   const pool = {
@@ -745,7 +789,7 @@ test("a failed oldest event cools down independently and is retried after newer 
       fetcher: async (_url, options) => {
         const text = JSON.parse(options.body).text;
         calls.push(text);
-        if (text.includes("event 14") && olderAttempts++ === 0) {
+        if (text.includes("BTCUSDT") && olderAttempts++ === 0) {
           return { ok: false, status: 503 };
         }
         return { ok: true, json: async () => ({ ok: true }) };
@@ -754,17 +798,17 @@ test("a failed oldest event cools down independently and is retried after newer 
 
     await assert.rejects(notifier.tick(), /HTTP 503/);
     assert.equal(calls.length, 2, "the newer event is attempted despite the oldest failure");
-    assert.match(calls[0], /event 14/);
-    assert.match(calls[1], /event 15/);
+    assert.match(calls[0], /BTCUSDT/);
+    assert.match(calls[1], /ETHUSDT/);
     assert.deepEqual([...sentIds], ["15"]);
 
     await notifier.tick();
     assert.equal(calls.length, 3, "only one successful delivery is made per tick");
-    assert.match(calls[2], /event 16/);
+    assert.match(calls[2], /DOGEUSDT/);
     now += 60_001;
     await notifier.tick();
     assert.equal(calls.length, 4);
-    assert.match(calls[3], /event 14/);
+    assert.match(calls[3], /BTCUSDT/);
     assert.deepEqual([...sentIds], ["15", "16", "14"]);
   } finally {
     Date.now = originalNow;
@@ -850,7 +894,7 @@ test("delivers an event whose kind or intent state the old allowlist would have 
   const notifier = createVstTelegramNotifier({
     pool, token: "123:TEST_TOKEN", chatId: "-123",
     fetcher: async (_url, options) => {
-      assert.match(JSON.parse(options.body).text, /symbol currently offline/);
+      assert.match(JSON.parse(options.body).text, /нераспознанное событие/);
       return { ok: true, json: async () => ({ ok: true }) };
     },
   });
@@ -901,7 +945,7 @@ test("entry queue telemetry is explicitly excluded from Telegram delivery", asyn
   });
   await notifier.tick();
   assert.equal(sent.length, 1);
-  assert.match(sent[0], /symbol currently offline/);
+  assert.match(sent[0], /нераспознанное событие/);
   assert.deepEqual(
     calls.filter(({ sql }) => sql.includes("SET telegram_sent_at"))
       .map(({ args }) => args[0]),

@@ -45,7 +45,11 @@ const FAILURE_REASONS = new Map([
   ["entry_abandoned_confirmed_flat_account",
     "по этому символу не найдены открытая позиция и активные заявки; это не означает, что баланс счёта нулевой"],
   ["entry_unverified_symbol_flat_after_timeout",
-    "исход входа не подтвердился за 10 минут; по символу нет позиции и заявок -- сделки нет, сигнал закрыт без повторной заявки"],
+    "Вход не состоялся: проверены заявка, история сделок, позиции и активные ордера. Сигнал снят через 10 минут, повторного входа не будет. Ваших действий не требуется."],
+  ["source_closed", "сигнальный бот завершил сделку"],
+  ["source_withdrawn_before_entry", "сигнальный бот отменил сигнал до подтверждённого входа"],
+  ["signal_expired_before_entry_reservation", "сигнал устарел до открытия позиции; вход отменён"],
+  ["policy_rejected", "сигнал не прошёл проверку торговых правил"],
 ]);
 // The three literal reasons above cover "entry"; the same abandon logic
 // (vst-worker.mjs FLAT_ACCOUNT_ABANDON_OPERATIONS / CLOSE_ABANDON_OPERATIONS)
@@ -141,7 +145,7 @@ export function formatVstTelegramEvent(event) {
     const timestamp = new Date(event.createdAt);
     return [
       "BingX VST · системное событие без сигнала",
-      "Событие записано в журнал VST; подробности доступны владельцу в журнале.",
+      "Не удалось определить инструмент события. Состояние позиций этим сообщением не подтверждается.",
       Number.isFinite(timestamp.getTime()) ? `Событие: ${timestamp.toISOString()}` : null,
     ].filter(Boolean).join("\n");
   }
@@ -162,6 +166,13 @@ export function formatVstTelegramEvent(event) {
     "vst_impulse_entry_verified_split_pending",
   ].includes(event.kind);
   const raiseReasonText = RAISE_STOP_REASON_TEXT.get(event.request?.reason);
+  const resolvedWorkerError = event.kind === "vst_worker_error" &&
+    (details.reason === "entry_unverified_symbol_flat_after_timeout" ||
+      details.reason === "entry_abandoned_confirmed_flat_account" ||
+      details.reason === "entry_verification_abandoned_confirmed_open_unprotected" ||
+      describeAbandonReason(details.reason) !== null);
+  const actionIncludesReason = resolvedWorkerError ||
+    event.kind === "source_exit_completed" || event.kind === "vst_source_exit_unentered";
   let action;
   switch (event.kind) {
     case "vst_pre_runner_close_retry_limit":
@@ -254,7 +265,9 @@ export function formatVstTelegramEvent(event) {
         : "Защитный стоп позиции повышен на BingX VST";
       break;
     case "vst_worker_error":
-      action = "Ошибка обработки сигнала. Эта ошибка сама по себе не доказывает ни исполнения, ни отсутствия сделки; проверьте позицию и заявки на BingX VST";
+      action = resolvedWorkerError
+        ? FAILURE_REASONS.get(details.reason) ?? describeAbandonReason(details.reason)
+        : "Не удалось подтвердить результат операции. Проверьте позицию и активные заявки на BingX VST; не повторяйте ордер до проверки.";
       break;
     case "vst_signal_rejected":
       action = "Сигнал отклонён. Открытие позиции НЕ подтверждено";
@@ -296,17 +309,26 @@ export function formatVstTelegramEvent(event) {
     case "exchange_history_provenance":
       action = "Позиция ЗАКРЫТА. Полный вход и выход подтверждены историей BingX; закрытие восстановлено в журнале. Повторная заявка на закрытие не нужна.";
       break;
-    case "source_exit_completed":
-      action = details.closureOrigin === "already_committed_exchange_history"
-        ? "Команда сигнального бота завершена: позиция уже подтверждённо закрыта на BingX. Новых торговых заявок не отправлялось."
-        : "Сверка команды сигнального бота завершена; результат сохранён в журнале.";
+    case "vst_source_exit_unentered":
+      action = "Сигнальный бот завершил сигнал до подтверждённого входа. Новый вход отменён.";
       break;
-    // Every other recorded event still reaches the owner instead of being
-    // silently dropped -- this bot must never process a signal without a
-    // Telegram trace, even for a kind this formatter has no dedicated,
-    // reviewed wording for yet.
+    case "source_exit_completed":
+      action = details.outcome === "cancelled_unentered"
+        ? "Сигнальный бот завершил сигнал. Подтверждённого входа нет; новый вход отменён. Ордер на закрытие не отправлялся."
+        : details.outcome === "closed" &&
+          (details.detail?.closureOrigin ?? details.closureOrigin) === "already_committed_exchange_history"
+        ? "Команда сигнального бота завершена: позиция уже подтверждённо закрыта на BingX. Новых торговых заявок не отправлялось."
+        : details.outcome === "closed" &&
+          details.detail?.closureOrigin === "already_committed_protective_stop"
+          ? "Позиция уже закрыта защитным стопом на BingX VST. Команда сигнального бота учтена без повторного закрытия."
+        : details.outcome === "closed"
+          ? "Позиция закрыта на BingX VST по команде сигнального бота. Закрытие подтверждено."
+          : "Получен результат команды закрытия, но он не распознан. Закрытие позиции не подтверждено; проверьте позицию на BingX VST.";
+      break;
+    // Never infer an execution outcome or expose raw exception data for an
+    // event that has no reviewed description.
     default:
-      action = `Событие BingX VST: ${String(event.kind).replace(/^vst_/, "").replace(/_/g, " ")}`;
+      action = "Получено нераспознанное событие. Оно не подтверждает открытие или закрытие позиции.";
       break;
   }
   const timestamp = new Date(event.createdAt);
@@ -314,8 +336,8 @@ export function formatVstTelegramEvent(event) {
   return [
     `BingX VST · ${symbol}`,
     action,
-    (FAILURE_EVENT_KINDS.includes(event.kind) || hasReason)
-      ? `Причина: ${FAILURE_REASONS.get(details.reason) ?? describeAbandonReason(details.reason) ?? "подробности в журнале VST"}`
+    !actionIncludesReason && (FAILURE_EVENT_KINDS.includes(event.kind) || hasReason)
+      ? `Причина: ${FAILURE_REASONS.get(details.reason) ?? describeAbandonReason(details.reason) ?? "не распознана; результат сделки не подтверждён"}`
       : null,
     qty ? `Количество: ${qty}` : null,
     price ? `Цена исполнения: ${price}` : null,
@@ -805,6 +827,8 @@ const SILENT_VST_EVENT_KINDS = new Set([
   "vst_margin_top_up_recovery_prepared",
   "vst_runner_cancel_pre_transport_refused",
   "vst_stop_transfer_not_sent",
+  // The source_exit_completed result describes this same cancellation.
+  "vst_source_exit_unentered",
 ]);
 // The same problem (kind + signal + reason) is posted at most once per window.
 const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;
