@@ -6,6 +6,7 @@ import { vstReadIncidentKey } from "./vst-diagnostics.mjs";
 import {
   isSafeVstClientOrderId, isSafeVstExchangeOrderId,
 } from "./vst-intent-diagnostics.mjs";
+import { formatVstTradeOutcome, vstTradeOutcome } from "./telegram-trade-outcomes.mjs";
 
 // Exchange-confirmed VST events are delivered independently of the trading worker.
 // A crash between Telegram accepting a message and the DB acknowledgement can
@@ -803,74 +804,12 @@ export function createSourceSyncLivenessAlerter({ token, chatId, fetcher = fetch
   };
 }
 
-// Internal lifecycle noise. These rows stay in the vst_events ledger (marked
-// delivered silently) but never reach the chat: every signal still gets its
-// owner-facing trace (opened / rejected with reason / closed / needs action),
-// while per-status-change and per-phase diagnostics no longer flood the chat
-// and no longer delay real alerts behind the one-message-per-tick pace.
-// Only reviewed, owner-facing outcomes are delivered. New internal events
-// must not become meaningless Telegram alerts via the formatter fallback.
-const SILENT_VST_EVENT_KINDS = new Set([
-  "vst_margin_mode_preparation_verified",
-  "vst_signal_status_changed",
-  "vst_position_management_diagnostic",
-  "vst_impulse_split_phase_verified",
-  "vst_original_stop_cancel_pre_mutation_read_refused",
-  "vst_raise_stop_pre_upgrade_refusal_confirmed",
-  "vst_raise_stop_refusal_settled_after_closed_fill",
-  "vst_raise_stop_equal_price_noop_confirmed",
-  "vst_stop_protection_adopted",
-  "vst_stop_degraded_protection_observed",
-  "vst_impulse_runner_fill_cleanup_pending",
-  "vst_impulse_partial_close_cleanup_pending",
-  "vst_impulse_runner_cleanup_completed",
-  "vst_impulse_split_cleanup_verified",
-  "vst_impulse_flat_close_cleanup_pending",
-  "vst_impulse_flat_stops_cleaned",
-  // Queue/bookkeeping rows: the outcome is reported by its own event
-  // (source_exit_completed, entry verified/rejected, worker error).
-  "source_exit_requested",
-  "vst_failed_entry_recovery_started",
-  "vst_margin_top_up_recovery_prepared",
-  "vst_runner_cancel_pre_transport_refused",
-  "vst_stop_transfer_not_sent",
-  // The source_exit_completed result describes this same cancellation.
-  "vst_source_exit_unentered",
-]);
-const USER_FACING_VST_EVENT_KINDS = new Set([
-  "vst_pre_runner_close_retry_limit",
-  "vst_entry_verified",
-  "vst_entry_margin_top_up_pending",
-  "vst_impulse_entry_margin_top_up_pending",
-  "vst_margin_top_up_verified",
-  "vst_margin_top_up_funded_but_unsafe",
-  "vst_impulse_entry_verified_split_pending",
-  "vst_action_reconciled",
-  "vst_triggered_stop_verified",
-  "vst_impulse_triggered_stop_verified",
-  "vst_impulse_sole_split_leg_closed",
-  "vst_impulse_full_split_position_closed",
-  "vst_impulse_split_stop_upgrade_completed",
-  "vst_impulse_sole_core_stop_raised",
-  "vst_worker_error",
-  "vst_signal_rejected",
-  "vst_margin_top_up_unconfirmed",
-  "vst_stop_protection_degraded",
-  "vst_action_unresolved",
-  "exchange_history_provenance",
-  "source_exit_completed",
-]);
-// The same problem (kind + signal + reason) is posted at most once per window.
+// Only trade outcomes reach the chat; all technical rows stay in the ledger.
+// Equivalent outcome events for one signal share the repeat window.
 const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 export function isUserFacingVstEvent(row) {
-  if (!row || SILENT_VST_EVENT_KINDS.has(row.kind) ||
-      !USER_FACING_VST_EVENT_KINDS.has(row.kind)) return false;
-  if (row.kind === "vst_action_reconciled") {
-    const operation = row.request?.operation ?? row.outcome?.operation;
-    return ["close_leg", "raise_stop", "set_runner_break_even"].includes(operation);
-  }
-  return true;
+  return vstTradeOutcome(row) !== null;
 }
 
 export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch }) {
@@ -928,8 +867,9 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
           const eventId = String(row.id);
           const retryAt = retryAfterByEvent.get(eventId);
           if (retryAt > Date.now()) continue;
-          let suppress = !isUserFacingVstEvent(row);
-          const repeatKey = `${row.kind}|${row.source_signal_id ?? ""}|${row.detail?.reason ?? ""}`;
+          let suppress = !isUserFacingVstEvent(row) ||
+            !/^[A-Z0-9]{1,20}USDT$/.test(row.body?.symbol ?? "");
+          const repeatKey = `${vstTradeOutcome(row)}|${row.source_signal_id ?? row.id}`;
           const lastPosted = postedAtByKey.get(repeatKey);
           if (!suppress && lastPosted != null &&
               Date.now() - lastPosted < VST_TELEGRAM_REPEAT_WINDOW_MS) {
@@ -945,7 +885,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
           }
           let message;
           try {
-            message = formatVstTelegramEvent({
+            message = formatVstTradeOutcome({
               kind: row.kind,
               detail: row.detail,
               outcome: row.outcome,

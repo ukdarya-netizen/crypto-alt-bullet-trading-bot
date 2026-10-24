@@ -11,6 +11,7 @@ import { createVstTickLivenessWatchdog, safeTickErrorSummary } from "./vst-tick-
 import { recordVstDiagnostic } from "./vst-diagnostics.mjs";
 import { createVstContractDriftMonitor } from "./vst-contract-drift.mjs";
 import { postTelegramMessage } from "./telegram-client.mjs";
+import { TECHNICAL_TELEGRAM_ALERTS_ENABLED } from "./telegram-trade-outcomes.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstEntryHealthMonitor } from "./vst-entry-health.mjs";
 import { createVstEntryHealthAlerter } from "./vst-telegram.mjs";
@@ -304,7 +305,7 @@ export async function startBotWorker() {
   // delivers notifications, and only to the explicitly paired chat ID.
   const vstAlertsEnabled = vstActive && process.env.NODE_ENV === "production" &&
     Boolean(process.env.TELEGRAM_BOT_TOKEN) && Boolean(process.env.TELEGRAM_CHAT_ID);
-  const blockedAlerter = vstAlertsEnabled
+  const blockedAlerter = vstAlertsEnabled && TECHNICAL_TELEGRAM_ALERTS_ENABLED
     ? createVstBlockedAlerter({
         token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID,
       })
@@ -317,7 +318,7 @@ export async function startBotWorker() {
   });
   // REAL/VST exchange-vs-source discrepancy alerts share the same
   // production-only, explicit-chat-id gating as the other Telegram alerts.
-  const discrepancyAlertsEnabled = process.env.NODE_ENV === "production" &&
+  const discrepancyAlertsEnabled = TECHNICAL_TELEGRAM_ALERTS_ENABLED && process.env.NODE_ENV === "production" &&
     Boolean(process.env.TELEGRAM_BOT_TOKEN) && Boolean(process.env.TELEGRAM_CHAT_ID);
   const discrepancyAlerter = discrepancyAlertsEnabled
     ? createSourceDiscrepancyAlerter({
@@ -339,7 +340,7 @@ export async function startBotWorker() {
             // Independent of signal-health and conflicting-intent diagnostics.
             // report is a value-free allowlisted projection, never raw data.
             process.stderr.write(`BingX VST contract drift: ${JSON.stringify(report)}\n`);
-            if (vstAlertsEnabled) {
+            if (vstAlertsEnabled && TECHNICAL_TELEGRAM_ALERTS_ENABLED) {
               await postTelegramMessage({
                 token: process.env.TELEGRAM_BOT_TOKEN,
                 chatId: process.env.TELEGRAM_CHAT_ID,
@@ -453,7 +454,7 @@ export async function startBotWorker() {
     });
     sourceFreshnessWatchdog?.failed();
   };
-  const sourceAlertsEnabled = process.env.NODE_ENV === "production" &&
+  const sourceAlertsEnabled = TECHNICAL_TELEGRAM_ALERTS_ENABLED && process.env.NODE_ENV === "production" &&
     Boolean(process.env.TELEGRAM_BOT_TOKEN) && Boolean(process.env.TELEGRAM_CHAT_ID);
   const sourceLivenessAlerter = sourceAlertsEnabled
     ? createSourceSyncLivenessAlerter({
@@ -733,7 +734,7 @@ export async function startBotWorker() {
   }
   workerTickLoopsStarted = true;
   if (mode === "vst" || mode === "both") {
-    const healthAlerter = vstAlertsEnabled ? createVstEntryHealthAlerter({
+    const healthAlerter = vstAlertsEnabled && TECHNICAL_TELEGRAM_ALERTS_ENABLED ? createVstEntryHealthAlerter({
       token: process.env.TELEGRAM_BOT_TOKEN, chatId: process.env.TELEGRAM_CHAT_ID,
     }) : null;
     const healthMonitor = createVstEntryHealthMonitor({

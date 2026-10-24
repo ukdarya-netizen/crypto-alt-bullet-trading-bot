@@ -65,7 +65,9 @@ test("source close messages distinguish cancellation, exchange closure and unkno
   assert.match(unknown, /Закрытие позиции не подтверждено/);
   assert.doesNotMatch(unknown, /private-token|журнал/);
   assert.equal(isUserFacingVstEvent({ kind: "vst_source_exit_unentered" }), false);
-  assert.equal(isUserFacingVstEvent({ kind: "source_exit_completed" }), true);
+  assert.equal(isUserFacingVstEvent({
+    kind: "source_exit_completed", detail: { outcome: "closed" },
+  }), true);
 });
 
 test("temporary market-read alert describes a data refusal, not a missing stop or manual intervention", () => {
@@ -619,7 +621,7 @@ test("acknowledges only after Telegram accepts; failed sends remain retryable", 
   assert.deepEqual(select.args, [[]]);
 });
 
-test("Telegram top-up notification reports exchange history without attributing the POST to the bot", async () => {
+test("Telegram acknowledges top-up bookkeeping without sending it", async () => {
   const calls = [];
   const sentMessages = [];
   const row = {
@@ -666,16 +668,12 @@ test("Telegram top-up notification reports exchange history without attributing 
 
   await notifier.tick();
 
-  assert.equal(sentMessages.length, 1);
-  assert.match(sentMessages[0], /уникальная запись добавления маржи/);
-  assert.match(sentMessages[0], /не позволяет определить, отправил ли именно бот POST/);
-  assert.match(sentMessages[0], /Защита позиции проверена как безопасная/);
-  assert.doesNotMatch(sentMessages[0], /POST бота подтверждён|бот отправил POST/);
+  assert.equal(sentMessages.length, 0);
   assert.deepEqual(calls.find((call) =>
     call.sql?.includes("SET telegram_sent_at")).args, ["margin-top-up-verified-1"]);
 });
 
-test("the outbox selects and sends signal-less and ordinary events exactly once", async () => {
+test("the outbox skips technical rows and sends a concise trade outcome once", async () => {
   const calls = [];
   const sentIds = new Set();
   const sentMessages = [];
@@ -730,24 +728,10 @@ test("the outbox selects and sends signal-less and ordinary events exactly once"
   });
 
   await notifier.tick();
-  assert.deepEqual([...sentIds], ["12"]);
-  assert.match(sentMessages[0], /^BingX VST · системное событие без сигнала/);
-  assert.doesNotMatch(sentMessages[0],
-    /private-provider-message|private-secret|private-account/);
-
-  await notifier.tick();
   assert.deepEqual([...sentIds], ["12", "13", "14"]);
-  assert.equal(sentMessages.length, 2, "unknown bookkeeping is skipped without delaying the entry");
-  assert.match(sentMessages[1], /^BingX VST · BTCUSDT/);
-  assert.match(sentMessages[1], /Открыта позиция.*подтверждены BingX VST/);
-  assert.equal(sentMessages[1], formatVstTelegramEvent(event("vst_entry_verified", {
-    symbol: "BTCUSDT",
-    detail: { fillPrice: 42 },
-    request: { operation: "entry" },
-    createdAt: "2026-09-27T08:02:00Z",
-  })));
+  assert.deepEqual(sentMessages, ["BingX VST · BTCUSDT\nПозиция открыта."]);
   await notifier.tick();
-  assert.equal(sentMessages.length, 2, "accepted events are not resent");
+  assert.equal(sentMessages.length, 1, "accepted events are not resent");
   assert.equal(calls.filter((call) => call.sql?.includes("SET telegram_sent_at")).length, 3);
 });
 
@@ -755,7 +739,7 @@ test("a failed oldest event cools down independently and is retried after newer 
   const calls = [];
   const sentIds = new Set();
   const rows = ["14", "15", "16"].map((id) => ({
-    id, source_signal_id: `signal-${id}`, kind: "vst_worker_error", detail: {},
+    id, source_signal_id: `signal-${id}`, kind: "vst_signal_rejected", detail: {},
     body: { symbol: { "14": "BTCUSDT", "15": "ETHUSDT", "16": "DOGEUSDT" }[id] },
     request: null, outcome: null,
     created_at: new Date("2026-09-27T08:00:00Z"),
@@ -859,7 +843,7 @@ test("a confirmed VST opening is delivered before an older non-entry backlog", a
   });
   await notifier.tick();
   assert.deepEqual([...sentIds], ["15"]);
-  assert.match(sentMessages[0], /Позиция ОТКРЫТА на BingX VST/);
+  assert.equal(sentMessages[0], "BingX VST · ETHUSDT\nПозиция открыта.");
   await notifier.tick();
   assert.deepEqual([...sentIds], ["15", "14"]);
 });
@@ -907,7 +891,7 @@ test("entry queue telemetry is explicitly excluded from Telegram delivery", asyn
       request: null, outcome: null, created_at: new Date(),
     },
     {
-      id: "51", kind: "vst_worker_error", detail: {},
+      id: "51", kind: "vst_signal_rejected", detail: {},
       body: { symbol: "DOGEUSDT" }, request: null, outcome: null,
       created_at: new Date(),
     },
@@ -940,7 +924,7 @@ test("entry queue telemetry is explicitly excluded from Telegram delivery", asyn
   });
   await notifier.tick();
   assert.equal(sent.length, 1);
-  assert.match(sent[0], /Не удалось подтвердить результат операции/);
+  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.");
   assert.deepEqual(
     calls.filter(({ sql }) => sql.includes("SET telegram_sent_at"))
       .map(({ args }) => args[0]),
@@ -1364,29 +1348,28 @@ test("internal lifecycle noise is acknowledged silently and repeats are posted o
   });
   await notifier.tick();
   assert.equal(sent.length, 1);
-  assert.match(sent[0], /Сигнал отклонён/);
+  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.");
   assert.deepEqual([...sentIds], ["59", "60", "61", "62"]);
   await notifier.tick();
   assert.equal(sent.length, 1, "the identical repeat is not posted again");
   assert.deepEqual([...sentIds], ["59", "60", "61", "62", "63"]);
 });
 
-test("trade outcomes and actionable risks remain user-facing with reviewed text", () => {
+test("only final trade outcomes are user-facing; technical risks stay in the journal", () => {
   for (const kind of [
     "vst_entry_verified", "vst_signal_rejected", "vst_triggered_stop_verified",
-    "vst_worker_error", "vst_action_unresolved", "vst_margin_top_up_unconfirmed",
-    "vst_margin_top_up_funded_but_unsafe", "vst_stop_protection_degraded",
-    "source_exit_completed", "exchange_history_provenance",
+    "exchange_history_provenance",
   ]) {
     assert.equal(isUserFacingVstEvent({ kind }), true, kind);
     assert.equal(typeof formatVstTelegramEvent(event(kind)), "string", kind);
   }
-  for (const operation of ["close_leg", "raise_stop", "set_runner_break_even"]) {
+  for (const operation of ["raise_stop", "set_runner_break_even", "prepare_margin_mode"]) {
     assert.equal(isUserFacingVstEvent({
       kind: "vst_action_reconciled", request: { operation },
-    }), true, operation);
+    }), false, operation);
   }
   assert.equal(isUserFacingVstEvent({
-    kind: "vst_action_reconciled", request: { operation: "prepare_margin_mode" },
-  }), false);
+    kind: "vst_action_reconciled",
+    request: { operation: "close_leg", nextPolicy: { status: "closed" } },
+  }), true);
 });
