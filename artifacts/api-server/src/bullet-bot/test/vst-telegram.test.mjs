@@ -924,7 +924,7 @@ test("entry queue telemetry is explicitly excluded from Telegram delivery", asyn
   });
   await notifier.tick();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.");
+  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.\nПричина: причина не указана");
   assert.deepEqual(
     calls.filter(({ sql }) => sql.includes("SET telegram_sent_at"))
       .map(({ args }) => args[0]),
@@ -1348,7 +1348,7 @@ test("internal lifecycle noise is acknowledged silently and repeats are posted o
   });
   await notifier.tick();
   assert.equal(sent.length, 1);
-  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.");
+  assert.equal(sent[0], "BingX VST · DOGEUSDT\nПозиция не открыта.\nПричина: сигнал устарел до входа");
   assert.deepEqual([...sentIds], ["59", "60", "61", "62"]);
   await notifier.tick();
   assert.equal(sent.length, 1, "the identical repeat is not posted again");

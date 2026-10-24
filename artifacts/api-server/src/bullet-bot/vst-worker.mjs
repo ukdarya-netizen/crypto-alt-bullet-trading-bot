@@ -1468,6 +1468,65 @@ export function createVstWorker({
   onTiming,
 }) {
   let directCloseCompletion = null;
+  // sourceSignalId -> full-take evidence observed between management ticks.
+  // Bound to the position's exact entry via fullTakeRequestId, so a changed
+  // entry invalidates it automatically.
+  const fullTakeLatches = new Map();
+
+  function latchedFullTakeEvidence(record) {
+    const state = record?.snapshot ?? {};
+    const requestId = fullTakeRequestId(record?.sourceSignalId, state.entryPrice);
+    for (const candidate of [fullTakeLatches.get(record?.sourceSignalId), state.fullTakeLatch]) {
+      if (fullTakeEvidenceValid(candidate, record?.sourceSignalId, state.symbol, requestId)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  // Read-only: one bulk last-price read for every open full-take position.
+  // A touch of exactly +5% from the position's own fill entry is latched;
+  // the close itself always goes through managePosition's verified lane.
+  async function observeFullTakePrices() {
+    if (exitStrategy !== FULL_TAKE_5PCT || typeof broker.readLastPrices !== "function" ||
+        typeof store.listOpenPositions !== "function") return 0;
+    const open = await store.listOpenPositions();
+    const openIds = new Set(open.map((record) => record?.sourceSignalId));
+    for (const id of [...fullTakeLatches.keys()]) {
+      if (!openIds.has(id)) fullTakeLatches.delete(id);
+    }
+    const records = open.filter((record) =>
+      record?.status === "open" && Number(record.snapshot?.remainingQty) > 0 &&
+      record.snapshot?.environment === "vst" &&
+      typeof record.snapshot?.symbol === "string" &&
+      !latchedFullTakeEvidence(record));
+    if (records.length === 0) return 0;
+    const quotes = await broker.readLastPrices([...new Set(records.map((r) => r.snapshot.symbol))]);
+    const bySymbol = new Map((Array.isArray(quotes) ? quotes : []).map((q) => [q.symbol, q]));
+    let latched = 0;
+    for (const record of records) {
+      const quote = bySymbol.get(record.snapshot.symbol);
+      if (!quote) continue;
+      const row = fullTakeRequest({ ...record.snapshot, sourceSignalId: record.sourceSignalId },
+        { ...quote, price: quote.priceDecimal ?? quote.price }, Number(clock()));
+      if (!row) continue;
+      fullTakeLatches.set(record.sourceSignalId, row.evidence);
+      latched += 1;
+      try {
+        await store.latchFullTakeEvidence?.(record.sourceSignalId, row.evidence);
+        await store.recordEvent?.(record.sourceSignalId, "vst_full_take_touched", {
+          symbol: record.snapshot.symbol, entryPrice: row.evidence.entryPrice,
+          observedPrice: row.evidence.observedPrice, observedAt: row.evidence.observedAt,
+          source: quote.source ?? "last_trade",
+        });
+      } catch (error) {
+        // The in-memory latch still closes the position on the next tick.
+        recordVstDiagnostic(error, { stage: "fullTakeWatch", operation: "latch_full_take",
+          symbol: record.snapshot.symbol, sourceSignalId: record.sourceSignalId });
+      }
+    }
+    return latched;
+  }
   if (!["source", FULL_TAKE_5PCT].includes(exitStrategy)) throw new TypeError("Invalid exit strategy");
   if (!store) throw new TypeError("A separate VST store is required");
   if (!["policy", "source"].includes(strategyAuthority)) {
@@ -5105,7 +5164,8 @@ export function createVstWorker({
       }
       const reason = "vst_order_rejected";
       await store.setSignalStatus(intent.sourceSignalId, "error", reason);
-      await store.recordEvent?.(intent.sourceSignalId, "vst_worker_error", { reason });
+      await store.recordEvent?.(intent.sourceSignalId, "vst_worker_error",
+        { reason, operation: intent.request?.operation ?? null });
       return { kind: "failed" };
     }
 
@@ -10899,7 +10959,8 @@ export function createVstWorker({
           state.sourceExitEvidence?.rule === FULL_TAKE_5PCT)) {
       const requestId = fullTakeRequestId(record.sourceSignalId, state.entryPrice);
       const prior = await store.getIntent(record.sourceSignalId, sourceExitPhase(requestId));
-      const saved = prior?.request?.sourceExit?.evidence ?? state.sourceExitEvidence;
+      const saved = prior?.request?.sourceExit?.evidence ?? state.sourceExitEvidence ??
+        latchedFullTakeEvidence(record);
       let row = fullTakeEvidenceValid(saved, record.sourceSignalId, state.symbol, requestId)
         ? { requestId, sourceSignalId: record.sourceSignalId, symbol: state.symbol,
           reason: FULL_TAKE_REASON, asOf: saved.asOf, observedAt: saved.observedAt, evidence: saved }
@@ -16037,5 +16098,6 @@ export function createVstWorker({
     readMarginTopUpMarginNow,
     closeMarginTopUpPositionNow,
     resolveLegacyPreRunnerClose,
+    observeFullTakePrices,
   };
 }

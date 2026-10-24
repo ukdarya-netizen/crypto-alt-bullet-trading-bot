@@ -1001,6 +1001,23 @@ export function createVstStore(pool) {
       return positionFromRow(result.rows[0]);
     },
 
+    // Durable latch for an observed fixed +5% take. Only fills an empty slot
+    // on a still-open position; never changes status, quantity or protection.
+    async latchFullTakeEvidence(sourceSignalId, evidence) {
+      const id = requireString(sourceSignalId, "sourceSignalId");
+      if (!validObject(evidence) || evidence.sourceSignalId !== id) {
+        throw new TypeError("Invalid full-take latch evidence");
+      }
+      const payload = serialize(evidence, "full-take latch");
+      await pool.query(
+        `UPDATE vst_positions
+         SET snapshot = jsonb_set(snapshot, '{fullTakeLatch}', $2::jsonb, true)
+         WHERE source_signal_id = $1 AND status = 'open'
+           AND NOT (snapshot ? 'fullTakeLatch')`,
+        [id, payload],
+      );
+    },
+
     async listOpenPositions() {
       const result = await pool.query(
         `SELECT source_signal_id, symbol, status, snapshot, updated_at

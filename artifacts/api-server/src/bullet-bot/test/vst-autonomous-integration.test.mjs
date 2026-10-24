@@ -5651,3 +5651,34 @@ test("an unverified account snapshot cancels the prepared handoff", async () => 
     "the cancelled handoff does not reuse an earlier account snapshot");
   assert.equal(typeof broker.readAccountState, "function");
 });
+test("fixed five-percent take latches a last-price touch between ticks and closes after the mark retraces", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  let lastPrice = "104.99";
+  const watched = { ...broker, readLastPrices: async (symbols) => symbols.map((symbol) => ({
+    verified: true, symbol, price: Number(lastPrice), priceDecimal: lastPrice,
+    observedAt: new Date(NOW - 1_000).toISOString(), source: "last_trade",
+  })) };
+  const worker = createVstWorker({ store, broker: watched, clock: () => NOW,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await worker.tick();
+  assert.equal(await worker.observeFullTakePrices(), 0, "below +5% is never latched");
+  assert.notEqual(store.data.positions[0].status, "closed");
+  lastPrice = "105";
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  assert.equal(await worker.observeFullTakePrices(), 0, "a latched touch is not re-latched");
+  assert.ok(store.data.events.some((row) => row[1] === "vst_full_take_touched"));
+  for (let i = 0; i < 10 && store.data.positions[0].status !== "closed"; i++) {
+    await worker.tick();
+  }
+  const position = store.data.positions[0];
+  assert.equal(position.status, "closed", JSON.stringify({
+    position, intents: store.data.intents, events: store.data.events.slice(-3),
+  }));
+  const closes = store.data.intents.filter(row => row.request.operation === "close_leg" &&
+    row.request.reason === "fixed_price_take_profit_5pct");
+  assert.equal(closes.length, 1);
+  assert.equal(closes[0].request.sourceExit.evidence.observedPrice, "105");
+  assert.equal(exchange.orders.length, 0);
+});

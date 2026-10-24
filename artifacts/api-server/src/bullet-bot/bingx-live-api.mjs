@@ -2839,6 +2839,52 @@ export function createBingXLiveApi({
     return readFreshVstQuote(symbol, VST_TICKER_PATH);
   }
 
+  // One public, read-only request for the last traded price of every VST
+  // contract. Used only to observe the fixed +5% take between management
+  // ticks; it never authorizes a write by itself. Rows without a fresh
+  // exchange timestamp are dropped, never back-filled with the local clock.
+  async function getVstLastPrices(symbols) {
+    if (environment !== "vst") {
+      throw new BingXLiveApiError("VST last-price reads are unavailable outside VST");
+    }
+    const wanted = new Set((Array.isArray(symbols) ? symbols : []).map(symbolName));
+    if (wanted.size === 0) return [];
+    await outboundPacer.waitForSlot();
+    let response;
+    try {
+      response = await fetchImpl(`${origin}${VST_TICKER_PATH}`,
+        { method: "GET", redirect: "error", signal: AbortSignal.timeout(TIMEOUT_MS) });
+    } catch {
+      throw new BingXLiveApiError("VST last-price read failed", { transportStage: "pre_transport" });
+    }
+    let payload;
+    try { payload = parseResponseJson(await response.text()); } catch {
+      throw new BingXLiveApiError("VST last-price response is invalid", { transportStage: "pre_transport" });
+    }
+    if (!response.ok || response.redirected === true || Number(payload?.code) !== 0 ||
+        !Array.isArray(payload?.data)) {
+      throw new BingXLiveApiError("VST last-price read failed", {
+        httpStatus: response?.status, code: payload?.code, transportStage: "exchange_response",
+      });
+    }
+    const receivedAt = Number(clock());
+    const result = [];
+    for (const row of payload.data) {
+      if (!wanted.has(row?.symbol)) continue;
+      let price;
+      try { price = strictNumeric(row.lastPrice, "VST last price"); } catch { continue; }
+      if (!(price > 0)) continue;
+      const rawTime = Number(row.time ?? row.timestamp ?? row.closeTime);
+      const timestamp = rawTime > 0 && rawTime < 100_000_000_000 ? rawTime * 1000 : rawTime;
+      const age = receivedAt - timestamp;
+      if (!Number.isSafeInteger(timestamp) || !Number.isFinite(age) ||
+          age < -2_000 || age > 10_000) continue;
+      result.push({ symbol: row.symbol, lastPrice: String(row.lastPrice),
+        timestamp: Math.min(timestamp, receivedAt) });
+    }
+    return result;
+  }
+
   async function readFreshVstQuote(symbol, quotePath) {
     const name = symbolName(symbol);
     if (environment !== "vst") {
@@ -7919,6 +7965,7 @@ export function createBingXLiveApi({
     placeVstAutomatedLong,
     getVstMarkPrice,
     getVstOpenPositionMark,
+    getVstLastPrices,
     placeVstAdditionalLongStop,
     upgradeVstLongStop,
     placeVstVirtualSplitLongStop,

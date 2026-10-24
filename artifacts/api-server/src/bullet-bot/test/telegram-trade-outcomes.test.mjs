@@ -13,10 +13,10 @@ test("Telegram has exactly four concise trade outcome messages", () => {
   for (const [row, text] of [
     [event("vst_entry_verified"), "Позиция открыта."],
     [event("vst_entry_margin_top_up_pending"), "Позиция открыта."],
-    [event("vst_signal_rejected"), "Позиция не открыта."],
+    [event("vst_signal_rejected"), "Позиция не открыта.\nПричина: причина не указана"],
     [event("vst_worker_error", {
       detail: { reason: "entry_unverified_symbol_flat_after_timeout" },
-    }), "Позиция не открыта."],
+    }), "Позиция не открыта.\nПричина: ордер не исполнен, позиции на бирже нет"],
     [event("vst_action_reconciled", {
       request: { operation: "close_leg", nextPolicy: { status: "closed" } },
     }), "Позиция зафиксирована."],
@@ -120,4 +120,20 @@ test("WOO lifecycle sends an opening and final result, never margin or reconcili
     "BingX VST · WOOUSDT\nПозиция зафиксирована.",
   ]);
   assert.equal(acknowledged.size, rows.length);
+});
+
+test("not-opened message always carries a readable reason", () => {
+  const text = (reason, kind = "vst_signal_rejected", extra = {}) =>
+    formatVstTradeOutcome(event(kind, { detail: { reason, ...extra } }));
+  assert.equal(text("insufficient_available_vst,below_minimum_notional"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: недостаточно свободных VST; сумма меньше минимальной");
+  assert.equal(text("vst_symbol_currently_offline:paused"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: монета сейчас недоступна на BingX VST");
+  assert.equal(text("some_new_code"),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: some_new_code");
+  assert.equal(text("vst_order_rejected", "vst_worker_error", { operation: "entry" }),
+    "BingX VST · WOOUSDT\nПозиция не открыта.\nПричина: биржа отклонила ордер");
+  assert.equal(vstTradeOutcome(event("vst_worker_error", {
+    detail: { reason: "vst_order_rejected", operation: "close_leg" },
+  })), null, "a rejected close is not a rejected entry");
 });

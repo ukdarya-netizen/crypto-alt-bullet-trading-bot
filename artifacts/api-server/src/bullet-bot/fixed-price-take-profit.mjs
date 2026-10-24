@@ -36,7 +36,7 @@ export function fullTakeRequest(position, mark, now) {
   if (mark?.verified !== true || position.environment !== "vst" ||
       typeof position.accountId !== "string" || !position.accountId ||
       mark.symbol !== position.symbol ||
-      !Number.isFinite(at) || now - at > 5_000 || at > now + 2_000 ||
+      !Number.isFinite(at) || now - at > 10_000 || at > now + 2_000 ||
       !reachedFullTake(position.entryPrice, mark.price)) return null;
   const requestId = fullTakeRequestId(position.sourceSignalId, position.entryPrice);
   const evidence = {

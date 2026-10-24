@@ -37,7 +37,7 @@ test("native take proof requires fresh verified marks and is not a source close"
     observedAt: new Date(now).toISOString() };
   for (const bad of [
     { ...mark, verified: false }, { ...mark, symbol: "BTCUSDT" },
-    { ...mark, observedAt: new Date(now - 5001).toISOString() },
+    { ...mark, observedAt: new Date(now - 10_001).toISOString() },
     { ...mark, observedAt: new Date(now + 2001).toISOString() },
     { ...mark, price: "104.9999" },
   ]) assert.equal(fullTakeRequest(state, bad, now), null);

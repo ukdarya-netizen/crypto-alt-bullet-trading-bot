@@ -16,6 +16,8 @@ export function vstTradeOutcome(event) {
   if (event.kind === "vst_signal_rejected") return "not_opened";
   if (event.kind === "vst_worker_error" &&
       detail.reason === "entry_unverified_symbol_flat_after_timeout") return "not_opened";
+  if (event.kind === "vst_worker_error" && detail.reason === "vst_order_rejected" &&
+      detail.operation === "entry") return "not_opened";
   if (event.kind === "vst_triggered_stop_verified") return "stop";
   if (event.kind === "vst_impulse_triggered_stop_verified") {
     return Number(detail.residualQuantity ?? 0) === 0 ? "stop" : null;
@@ -52,9 +54,46 @@ const OUTCOME_TEXT = {
   stop: "Сработал стоп-лосс.",
 };
 
+const NOT_OPENED_REASONS = [
+  [/^signal_expired/, "сигнал устарел до входа"],
+  [/^source_withdrawn|^source_entry_cancelled/, "сигнал отменён источником"],
+  [/^not_a_fresh_approved_v2_long$/, "сигнал не прошёл проверку (не свежий лонг)"],
+  [/^invalid_canonical_vst_symbol$/, "монета не торгуется на BingX VST"],
+  [/^vst_symbol_currently_offline/, "монета сейчас недоступна на BingX VST"],
+  [/^preexisting_exchange_position_or_order$/, "по монете уже есть позиция или ордер на бирже"],
+  [/^vst_margin_mode_state_not_verified_or_preparable$/, "не удалось подтвердить изолированную маржу"],
+  [/^vst_order_rejected$/, "биржа отклонила ордер"],
+  [/^entry_unverified_symbol_flat_after_timeout$/, "ордер не исполнен, позиции на бирже нет"],
+  [/^unsupported_vst_protective_capabilities/, "биржа не подтвердила нужные функции защиты"],
+];
+const SIZING_REASONS = {
+  below_minimum_quantity: "объём меньше минимального",
+  below_minimum_notional: "сумма меньше минимальной",
+  initial_margin_exceeds_one_percent_budget: "маржа больше лимита 1%",
+  insufficient_available_vst: "недостаточно свободных VST",
+  exceeds_leverage_position_cap: "превышен лимит позиции для плеча",
+};
+
+export function notOpenedReasonText(reason) {
+  if (typeof reason !== "string" || !reason) return "причина не указана";
+  const parts = reason.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length && parts.every((part) => SIZING_REASONS[part])) {
+    return parts.map((part) => SIZING_REASONS[part]).join("; ");
+  }
+  for (const [pattern, text] of NOT_OPENED_REASONS) {
+    if (pattern.test(reason)) return text;
+  }
+  // Unmapped codes are shown as-is (plain ASCII), never hidden.
+  return reason.replace(/[^A-Za-z0-9_:,.\- ]/g, "").slice(0, 120) || "причина не указана";
+}
+
 export function formatVstTradeOutcome(event) {
   const outcome = vstTradeOutcome(event);
   const symbol = event?.symbol ?? event?.body?.symbol;
   if (!outcome || !/^[A-Z0-9]{1,20}USDT$/.test(symbol ?? "")) return null;
-  return `BingX VST · ${symbol}\n${OUTCOME_TEXT[outcome]}`;
+  const lines = [`BingX VST · ${symbol}`, OUTCOME_TEXT[outcome]];
+  if (outcome === "not_opened") {
+    lines.push(`Причина: ${notOpenedReasonText(event?.detail?.reason)}`);
+  }
+  return lines.join("\n");
 }

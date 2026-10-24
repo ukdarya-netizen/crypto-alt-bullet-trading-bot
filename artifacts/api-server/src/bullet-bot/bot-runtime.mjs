@@ -69,6 +69,7 @@ let sourceLifecycleScheduler;
 let sourceFreshnessWatchdog;
 let vstFillArchiveScheduler;
 let workerTickScheduler;
+let fullTakeWatchTimer;
 let stopping = false;
 let drainPromise;
 
@@ -435,6 +436,25 @@ export async function startBotWorker() {
       process.stderr.write(`Bullet PAPER worker tick failed: ${error instanceof Error ? error.name : "Error"}\n`);
     },
   });
+  // Fixed +5% take: a read-only last-price watcher between management ticks.
+  // A touch is latched with exchange-timestamped evidence and wakes the VST
+  // worker, which closes through the normal verified exit lane.
+  if (vstWorker && typeof vstWorker.observeFullTakePrices === "function") {
+    let fullTakeWatchBusy = false;
+    fullTakeWatchTimer = setInterval(async () => {
+      if (stopping || fullTakeWatchBusy) return;
+      fullTakeWatchBusy = true;
+      try {
+        const latched = await vstWorker.observeFullTakePrices();
+        if (latched > 0) workerTickScheduler?.wakeVst?.();
+      } catch (error) {
+        process.stderr.write(`Bullet VST full-take watch failed: ${safeTickErrorSummary(error)}\n`);
+      } finally {
+        fullTakeWatchBusy = false;
+      }
+    }, 2_500);
+    fullTakeWatchTimer.unref?.();
+  }
   // Exit decisions are durably recorded from each complete, fresh snapshot
   // before PAPER application or a VST wake. The three consumers are isolated:
   // a PAPER advisory-lock wait, an exchange audit, or Telegram delivery never
@@ -770,6 +790,8 @@ export async function startBotWorker() {
 export function stopBotWorker() {
   stopping = true;
   workerTickScheduler?.();
+  clearInterval(fullTakeWatchTimer);
+  fullTakeWatchTimer = undefined;
   sourceLifecycleScheduler?.stop();
   sourceFreshnessWatchdog?.stop?.();
   clearInterval(notificationTimer);

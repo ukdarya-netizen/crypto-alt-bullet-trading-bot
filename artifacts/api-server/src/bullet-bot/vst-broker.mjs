@@ -7358,6 +7358,31 @@ export function createVstBroker({
     return { ...proof, entryIntent: intent };
   }
 
+  // Read-only last-trade observation for the fixed +5% take watcher. Returns
+  // only rows whose exchange timestamp is fresh; never used for sizing.
+  async function readLastPrices(symbols) {
+    if (typeof api.getVstLastPrices !== "function") return [];
+    const names = new Map();
+    for (const symbol of Array.isArray(symbols) ? symbols : []) {
+      names.set(assertSymbol(symbol), symbol);
+    }
+    if (names.size === 0) return [];
+    const rows = await api.getVstLastPrices([...names.values()]);
+    const now = Number(clock());
+    const result = [];
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const symbol = names.get(row?.symbol);
+      const observedAt = asMillis(row?.timestamp);
+      if (!symbol || observedAt === null || !Number.isSafeInteger(now) ||
+          observedAt > now + 2_000 || now - observedAt > 10_000) continue;
+      let price;
+      try { price = finitePositive(row.lastPrice, "last_price"); } catch { continue; }
+      result.push({ verified: true, symbol, price, priceDecimal: String(row.lastPrice),
+        observedAt: new Date(Math.min(observedAt, now)).toISOString(), source: "last_trade" });
+    }
+    return result;
+  }
+
   async function readMarketMark(symbol, { positionRead } = {}) {
     const name = assertSymbol(symbol);
     let provenQuote = null;
@@ -10670,6 +10695,7 @@ export function createVstBroker({
     ...(supportsHistoricalCloseProof === undefined
       ? {} : { supportsHistoricalCloseProof }),
     readMarketMark,
+    readLastPrices,
     readMarginTopUpBaseline,
     readMarginTopUpPlan,
     readMarginTopUpProtection,
