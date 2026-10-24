@@ -1,0 +1,58 @@
+{
+  "side": "buy",
+  "symbol": "WAXPUSDT",
+  "payload": {
+    "source": "CryptoAltBullet",
+    "leverage": 10,
+    "exitRules": {
+      "runner": {
+        "coreExit": "standard_trailing_stop",
+        "coreFraction": 0.8,
+        "policyVersion": "impulse_runner_v1",
+        "runnerFraction": 0.19999999999999996,
+        "expiryExitPrice": "observed_market_quote",
+        "trailingGapBasis": "percentage_points_of_entry_pnl",
+        "trailingActivationPct": 30,
+        "afterCoreEmergencyStop": "original_entry_breakeven",
+        "trailingGapPercentagePoints": 30,
+        "maxAgeHoursFromOriginalEntry": 120
+      },
+      "maxWatchDays": 4,
+      "breakevenAtPct": 5,
+      "firstTargetPct": 10,
+      "priceMoveBasis": "unleveraged_percent_from_actual_entry_fill",
+      "expiryExitPrice": "observed_market_quote",
+      "rMultipleTargets": false,
+      "trailingGapBasis": "percentage_points_of_entry_pnl",
+      "firstTargetAction": "milestone_not_full_close",
+      "noFixedTakeProfit": true,
+      "protectedProfitPct": 5,
+      "trailingExitAction": "close_remaining_position",
+      "partialProfitAdvice": {
+        "execution": "advice_only_not_automated",
+        "maxFraction": 0.25,
+        "minFraction": 0.2
+      },
+      "breakevenStopGainPct": 0,
+      "protectedProfitAtPct": 10,
+      "breakevenIncludesFees": false,
+      "trailingActivationPct": 15,
+      "trailingStopNeverDecreases": true,
+      "trailingGapPercentagePoints": 10
+    },
+    "marginMode": "isolated",
+    "rulesVersion": "bullet-long-exits-v2",
+    "initialMarginUsd": "10"
+  },
+  "quantity": "16570.00828500",
+  "signalAt": "2026-09-25T00:35:48.399Z",
+  "stopLoss": "0.0055522",
+  "orderType": "market",
+  "patternId": "impulse_buy",
+  "limitPrice": "0.006035",
+  "reduceOnly": false,
+  "patternStatus": "approved",
+  "referencePrice": "0.006035",
+  "sourceSignalId": "cab-signal-10536",
+  "confirmationStatus": "confirmed"
+}

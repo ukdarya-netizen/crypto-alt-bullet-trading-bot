@@ -1,0 +1,80 @@
+modules = ["nodejs-24", "python-base-3.13", "postgresql-16"]
+
+[deployment]
+router = "application"
+deploymentTarget = "gce"
+ignorePorts = false
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Trading Executor Worker"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "api-codegen-build"
+
+[[workflows.workflow]]
+name = "Trading Executor Worker"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server run worker:dev"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "api-codegen-build"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-spec run check:codegen-build && git diff --check"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[agent]
+stack = "PNPM_WORKSPACE"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.production]
+JOURNAL_OWNER_USER_ID = "user_3Jk07prMFkSEF8OebHZ1lVLydAM"
+BULLET_VST_ACCOUNT_ALIAS = "bingx-vst"
+BULLET_VST_CANARY_SYMBOLS = "BTCUSDT"
+BULLET_VST_MODE = "both"
+BULLET_VST_PAUSED = "0"
+BULLET_VST_STOP_BUFFER_RATE = "0.005"
+TELEGRAM_CHAT_ID = "7818695412"
+
+[userenv.shared]
+TRADING_APPROVED_PATTERN_IDS = "liquidation_cascade,balanced_grind,price_led_momentum,impulse_buy,Liquidatioln Cascade"
+
+[userenv.development]
+BULLET_VST_ACCOUNT_ALIAS = "bingx-vst"
+BULLET_VST_CANARY_SYMBOLS = "BTCUSDT"
+BULLET_VST_MODE = "both"
+BULLET_VST_STOP_BUFFER_RATE = "0.005"
+BULLET_VST_PAUSED = "0"

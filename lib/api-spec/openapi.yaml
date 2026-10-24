@@ -1,0 +1,2121 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: Signal intake and safety controls for the isolated trading executor.
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: trading
+    description: Trading executor operations
+  - name: journal
+    description: Private owner-only trading journal
+paths:
+  /trading/reset:
+    post:
+      operationId: requestOwnerTradingReset
+      tags: [trading]
+      summary: Cancel old queued entries and close own PAPER and VST positions
+      description: Requires the existing X-Trading-Token. Receipt is not proof of closure. REAL is excluded.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OwnerTradingResetInput"
+      responses:
+        "202":
+          description: Durable reset queued; execution and exchange verification are pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnerTradingResetResult"
+        "200":
+          description: Same reset ID already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnerTradingResetResult"
+        "401":
+          description: Trading token required
+        "409":
+          description: Another reset needs review or required VST worker is disabled
+        "422":
+          description: Explicit confirmation and valid reset ID required
+        "423":
+          description: A worker holds its leader lock; retry with the same reset ID
+        "503":
+          description: Storage unavailable; retry with the same reset ID
+    get:
+      operationId: getOwnerTradingReset
+      tags: [trading]
+      summary: Read reset progress, not just delivery receipt
+      parameters:
+        - in: query
+          name: resetId
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]{1,100}$"
+      responses:
+        "200":
+          description: Latest or requested reset
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OwnerTradingResetLookup"
+        "401":
+          description: Trading token required
+  /trading/commands:
+    post:
+      operationId: receiveSourceCommand
+      tags: [trading]
+      summary: Durably receive a source command, not an execution acknowledgement
+      parameters:
+        - name: x-trading-token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SourceCommandInput" }
+      responses:
+        "202":
+          description: Saved for independently confirmed PAPER/VST execution
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCommandAcknowledgement" }
+        "200":
+          description: Identical command already received
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCommandAcknowledgement" }
+        "401": { description: Trading token required }
+        "409": { description: Command identity or sequence conflict }
+        "422": { description: Invalid or unsupported command }
+        "503": { description: Retry the same command ID }
+    get:
+      operationId: listSourceCommandStatus
+      tags: [trading]
+      summary: Poll independent command execution statuses
+      parameters:
+        - name: x-trading-token
+          in: header
+          required: true
+          schema: { type: string }
+        - name: commandId
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100 }
+      responses:
+        "200":
+          description: Command receipts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCommandList" }
+        "401": { description: Trading token required }
+        "422": { description: Invalid query }
+        "503": { description: Inbox unavailable }
+  /journal/source-commands:
+    get:
+      operationId: getJournalSourceCommands
+      tags: [journal]
+      summary: Owner-only source command receipts
+      responses:
+        "200":
+          description: Recent commands and per-mode execution status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SourceCommandList" }
+        "401": { description: Sign-in required }
+        "403": { description: Owner required }
+        "503": { description: Inbox unavailable }
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /trading/status:
+    get:
+      operationId: getTradingStatus
+      tags: [trading]
+      summary: Get executor safety status
+      responses:
+        "200":
+          description: Current controls and worker state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+  /trading/signals:
+    get:
+      operationId: listTradingSignals
+      tags: [trading]
+      summary: Browse received signals, including entries skipped for insufficient funds
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 1000000
+            default: 0
+      responses:
+        "200":
+          description: Paginated signals, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [signals, hasMore]
+                properties:
+                  signals:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TradingSignal"
+                  hasMore:
+                    type: boolean
+    post:
+      operationId: enqueueTradingSignal
+      tags: [trading]
+      summary: Receive a confirmed, approved, idempotent signal
+      description: |
+        Requires the x-trading-token header matching TRADING_INGEST_TOKEN.
+        Requires the frozen relay's confirmed entry with its supplied market
+        buy quantity, exact stop and bullet-long-exits-v2 policy. No legacy
+        entries or receiver-derived size/stop are supported. $10 is the
+        isolated margin at 10x, not $10 of nominal exposure or a loss cap.
+        This endpoint queues PAPER only; no exchange order is activated.
+        A supplied liquidation_cascade event established the strict exitRules
+        shape below. All four owner-approved patterns can queue new PAPER
+        entries when their policy matches this shape and owner controls permit.
+        This does not prove parity with each pattern's live relay payload;
+        unknown shapes fail closed.
+        Runner break-even occurs at opening per the owner's later correction.
+        The four-day window is observation, not an automatic ordinary/core exit.
+        Later smart-cancellation requires separate verified exit events.
+        Signals outside the ten-minute execution window or received while
+        paper entries are off remain awaiting_rules and cannot execute later.
+        Only confirmationStatus=confirmed and patternStatus=approved are eligible.
+        patternId must also appear in the server's TRADING_APPROVED_PATTERN_IDS allowlist.
+        An exact replay of sourceSignalId returns 202 with duplicate=true and the
+        original signal. A changed payload for the same ID returns 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnqueueSignalRequest"
+      responses:
+        "202":
+          description: Signal accepted into the durable queue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnqueueSignalResponse"
+        "400":
+          description: Invalid signal
+        "401":
+          description: Missing or invalid signal ingest token
+        "422":
+          description: Candidate, experimental, or non-allowlisted pattern
+        "409":
+          description: Signal id already exists with a different payload
+        "503":
+          description: Ingest token or approved pattern allowlist not configured
+  /trading/paper/start:
+    post:
+      operationId: startPaperTrading
+      tags: [trading]
+      summary: Owner enables paper-only entries for new LONG signals
+      responses:
+        "200":
+          description: Paper-only execution enabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required or mode is not paper
+  /trading/paper/stop:
+    post:
+      operationId: stopPaperTrading
+      tags: [trading]
+      summary: Owner pauses paper entries
+      responses:
+        "200":
+          description: Paper execution paused
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required or mode is not paper
+  /trading/controls:
+    post:
+      operationId: updateTradingControls
+      tags: [trading]
+      summary: Update fail-closed execution controls
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTradingControlsRequest"
+      responses:
+        "200":
+          description: Controls updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingStatus"
+        "400":
+          description: Invalid controls
+        "401":
+          description: Missing or invalid control token
+  /journal/access:
+    get:
+      operationId: getJournalAccess
+      tags: [journal]
+      summary: Check signed-in owner's journal access
+      responses:
+        "200":
+          description: Access state for the current Clerk session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalAccess"
+        "401":
+          description: Sign-in required
+  /journal/overview:
+    get:
+      operationId: getJournalOverview
+      tags: [journal]
+      summary: Portfolio summary from recorded orders only
+      responses:
+        "200":
+          description: Private journal totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalOverview"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/bot:
+    get:
+      operationId: getJournalBot
+      tags: [journal]
+      summary: Read the active imported Bullet PAPER bot state
+      description: Owner-only browser session endpoint. Returns bot signals without their stored body or body hash.
+      responses:
+        "200":
+          description: Current Bullet PAPER wallet, recent signals, and positions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalBot"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/strategy-history:
+    get:
+      operationId: getJournalStrategyHistory
+      tags: [journal]
+      summary: Owner-only bot trades and prospective, sampled PAPER exit scenarios, separate from actual returns
+      responses:
+        "200":
+          description: All recorded Bullet bot positions, including open and incomplete trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalStrategyHistory"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/bingx-connection:
+    get:
+      operationId: getJournalBingxConnection
+      tags: [journal]
+      summary: Check the owner's BingX API connection using a read-only request
+      description: Never returns credentials or exchange balances. Does not enable exchange orders.
+      responses:
+        "200":
+          description: Sanitized BingX private API connection status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BingXConnectionStatus"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/bingx-live-preflight:
+    get:
+      operationId: getJournalBingxLivePreflight
+      tags: [journal]
+      summary: Read-only BingX account checks for preparing live trading
+      description: Owner-only. Never places an order, changes account settings, or returns balance/position details. Live execution remains disabled.
+      parameters:
+        - name: symbol
+          in: query
+          required: false
+          description: Optional canonical uppercase baseUSDT symbol, for example BTCUSDT. Runs an additional same-symbol isolation check; never enables order placement.
+          schema:
+            type: string
+            minLength: 6
+            maxLength: 24
+            pattern: "^[A-Z0-9]{2,20}USDT$"
+      responses:
+        "200":
+          description: Sanitized checks and reasons why live execution remains blocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BingXLivePreflight"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/bingx-positions:
+    get:
+      operationId: getJournalBingxPositions
+      tags: [journal]
+      summary: Read account-wide BingX USDT balance and swap positions
+      description: Owner-only signed GETs. Account balance and position reads have independent status and observation times. Never changes orders or account settings, and never attributes account values or positions to the PAPER bot.
+      responses:
+        "200":
+          description: Sanitized account-wide USDT values and exchange positions; each read reports an explicit independent status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BingXAccountPositions"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/bot-health:
+    get:
+      operationId: getJournalBotHealth
+      tags: [journal]
+      summary: Read owner-only bot health, normal operating limits and notification incidents
+      description: Local runtime telemetry and read-only ledger aggregates. Does not poll the exchange, send Telegram messages or change trading state. Unknown and paused components are explicit.
+      responses:
+        "200":
+          description: Current component health with real measurements and paging policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalBotHealth"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required
+        "503":
+          description: Health snapshot unavailable
+  /journal/vst-entry-queue:
+    get:
+      operationId: getJournalVstEntryQueue
+      tags: [journal]
+      summary: Read the owner's received VST entry queue without exchange actions
+      responses:
+        "200":
+          description: Current durable queue, limited to the first 100 entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstEntryQueue"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Owner access required
+        "503":
+          description: Queue read unavailable
+  /journal/vst-positions:
+    get:
+      operationId: getJournalVstPositions
+      tags: [journal]
+      summary: Read active VST bot ledger positions
+      description: Owner-only ledger snapshot, not a fresh BingX exchange read. No orders or account changes.
+      responses:
+        "200":
+          description: Sanitized VST ledger positions with explicit verification boundary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstPositions"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/vst-review:
+    get:
+      operationId: getJournalVstReview
+      tags: [journal]
+      summary: List VST positions stuck in ambiguous close review
+      description: Owner-only ledger snapshot of positions moved to the terminal error status by an unresolved close abandon. Not a fresh BingX exchange read.
+      responses:
+        "200":
+          description: Positions awaiting manual resolution
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewPositions"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/vst-review/{sourceSignalId}/resolve-closed:
+    post:
+      operationId: resolveJournalVstReviewClosed
+      tags: [journal]
+      summary: Owner confirms a stuck VST position actually closed on BingX
+      description: Requires owner-attested fill facts observed directly on BingX (price, quantity, time, fee, exchange order id). A fresh verified BingX VST snapshot must also match the stored account/environment and show no remaining position or open order for the symbol. The one fill must exactly match the locked position's remaining ledger quantity; a partial or oversized fill cannot mark the whole position closed. Fill history itself may be unavailable and remains owner-attested. Never submits or cancels an exchange order or invents a fill.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VstReviewResolveClosedRequest"
+      responses:
+        "200":
+          description: Position marked closed from owner-attested evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewResolution"
+        "400":
+          description: Invalid resolution request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting review, the stored and observed BingX account/environment do not match, the symbol is not flat or has open orders, or the fill quantity does not match its remaining ledger quantity
+        "503":
+          description: Fresh verified BingX VST account/position/open-order state is unavailable, or another VST worker currently holds the safety lock. No ledger close was recorded.
+  /journal/vst-review/{sourceSignalId}/resolve-pre-runner-close:
+    post:
+      operationId: resolveJournalVstReviewPreRunnerClose
+      tags: [journal]
+      summary: Owner resolves an unknown legacy pre-runner close intent
+      description: |
+        Owner-only recovery for a legacy close_pre_runner_split intent whose
+        exchange outcome is unknown. The original MARKET order is NOT proven
+        unsent. This operation never resends an order and never cancels a stop.
+        Before confirming, verify on BingX either that the position remains
+        open unchanged with both bot protective stops active, or that it is
+        closed with complete confirmed fills. Resolution may resume ordinary
+        automatic management and may create a new intent; it never retries the
+        original order.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VstReviewResolvePreRunnerCloseInput"
+      responses:
+        "200":
+          description: Legacy intent resolved or already resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewPreRunnerCloseResolution"
+        "400":
+          description: Invalid resolution request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Legacy intent or associated position not found
+        "409":
+          description: Resolution refused because the intent is no longer eligible or evidence could not be accepted
+        "503":
+          description: Another VST worker currently holds the safety lock
+  /journal/vst-review/{sourceSignalId}/resolve-open:
+    post:
+      operationId: resolveJournalVstReviewOpen
+      tags: [journal]
+      summary: Owner confirms a stuck VST position is still open on BingX
+      description: Requires the owner-observed current open quantity. Returns the position to normal automated management; never submits an exchange order.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VstReviewResolveOpenRequest"
+      responses:
+        "200":
+          description: Position returned to active management from owner-attested evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewResolution"
+        "400":
+          description: Invalid resolution request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting manual review
+  /journal/vst-review/{sourceSignalId}/margin-top-up-check:
+    get:
+      operationId: getJournalVstReviewMarginTopUpCheck
+      tags: [journal]
+      summary: Read-only fresh BingX isolated-margin reading for a pending margin top-up position
+      description: Surfaces the same live BingX isolated-margin reading the "confirm not added" action corroborates against, but before the owner clicks anything -- so the mismatch (or match) is visible on the review card up front. Never submits an exchange order and never writes to the ledger. Reports a non-"ok" outcome (never an HTTP error) when the position is not currently verifiable on the exchange, so the owner can still act through the existing form regardless.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      responses:
+        "200":
+          description: Live BingX margin reading, or a reason it could not be obtained this time
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewMarginTopUpCheck"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: VST worker not active
+  /journal/vst-review/{sourceSignalId}/resolve-margin-top-up-keep-open:
+    post:
+      operationId: resolveJournalVstReviewMarginTopUpKeepOpen
+      tags: [journal]
+      summary: Owner confirms a pending VST margin top-up was not added on BingX, and accepts continuing on the original stop
+      description: For a position whose entry and initial stop are verified but whose post-entry margin top-up never reached a confirmed outcome (marginTopUp.status stays "pending", which halts the whole VST pipeline). Requires the owner to have actually checked BingX, but never accepts that claim on its own -- a fresh, read-only BingX check of the same position's current isolated margin must corroborate it first. Does not submit an exchange order and does not fabricate a margin change; on corroboration it records the owner's observation that the top-up did not land, keeps the position open under its already-verified stop, and unblocks the pipeline. If the fresh read instead shows the top-up DID land (error VST_MARGIN_TOP_UP_ALREADY_ADDED), shows an unexpected margin value (VST_MARGIN_TOP_UP_MARGIN_MISMATCH), shows no matching position at all (VST_MARGIN_TOP_UP_POSITION_NOT_FOUND_ON_EXCHANGE), or the check could not be completed this time (VST_MARGIN_TOP_UP_CHECK_UNAVAILABLE), the request is refused with 409 and nothing is recorded.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VstReviewResolveMarginTopUpKeepOpenRequest"
+      responses:
+        "200":
+          description: Fresh BingX read corroborated the owner's claim; margin top-up marked as not added and the pipeline is unblocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewResolution"
+        "400":
+          description: Invalid resolution request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting margin top-up review, or the fresh BingX check did not corroborate the owner's claim (see VST_MARGIN_TOP_UP_ALREADY_ADDED, VST_MARGIN_TOP_UP_MARGIN_MISMATCH, VST_MARGIN_TOP_UP_POSITION_NOT_FOUND_ON_EXCHANGE, VST_MARGIN_TOP_UP_CHECK_UNAVAILABLE, VST_WORKER_NOT_ACTIVE)
+  /journal/vst-review/{sourceSignalId}/confirm-open-now:
+    post:
+      operationId: confirmJournalVstReviewOpenNow
+      tags: [journal]
+      summary: Bot confirms a stuck VST position is still open on BingX, using its own exchange access
+      description: Reads the live BingX position and, if still open, records it with the exchange-reported quantity through the same owner-attested write path the manual form uses. Requires no manually typed quantity, and never submits an exchange order. Reports outcome already_flat if BingX already shows no open position for this symbol -- use the close flow instead of guessing a quantity. Reports outcome not_confirmed if the read cannot be safely verified this time; retry or fall back to the manual form.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      responses:
+        "200":
+          description: Confirmation outcome; see JournalVstReviewConfirmOpenNowResult.outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewConfirmOpenNowResult"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting manual review
+  /journal/vst-review/{sourceSignalId}/close-now:
+    post:
+      operationId: closeJournalVstReviewNow
+      tags: [journal]
+      summary: Bot closes a stuck VST position now, using its own exchange access
+      description: Reads the live BingX position and, if still open, submits and verifies a real close order through the same execute-and-verify path as an automated close, then records it exactly like an owner-attested resolution. Requires no manually typed fill facts. Makes no exchange changes and reports outcome already_flat if BingX already shows no open position for this symbol. Reports outcome not_confirmed (never a fabricated close) if the attempt cannot be safely verified this time.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      responses:
+        "200":
+          description: Close outcome; see JournalVstReviewCloseNowResult.outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewCloseNowResult"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting manual review
+  /journal/vst-review/{sourceSignalId}/close-margin-top-up-now:
+    post:
+      operationId: closeJournalVstReviewMarginTopUpNow
+      tags: [journal]
+      summary: Bot closes a margin-top-up-pending VST position now, using its own exchange access
+      description: For a position whose entry and initial stop are verified but whose post-entry margin top-up never reached a confirmed outcome (marginTopUp.status stays "pending"). Reads the live BingX position and, if still open, submits and verifies a real close order through the same execute-and-verify path as an automated close, then records it exactly like an owner-attested resolution and clears the pending top-up so it stops blocking the VST pipeline. Requires no manually typed fill facts. Makes no exchange changes and reports outcome already_flat if BingX already shows no open position for this symbol. Reports outcome not_confirmed (never a fabricated close) if the attempt cannot be safely verified this time.
+      parameters:
+        - $ref: "#/components/parameters/VstSourceSignalId"
+      responses:
+        "200":
+          description: Close outcome; see JournalVstReviewCloseNowResult.outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalVstReviewCloseNowResult"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Position not found
+        "409":
+          description: Position is not awaiting margin top-up review
+  /journal/historical-cascade-selection:
+    get:
+      operationId: getJournalHistoricalCascadeSelection
+      tags: [journal]
+      summary: Read durable owner-selected historical liquidation_cascade preparation state
+      description: Owner-only. Reports a bounded historical signal claim only; it does not create an order or start execution.
+      responses:
+        "200":
+          description: Durable selection state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoricalCascadeSelection"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+    post:
+      operationId: selectJournalHistoricalCascadeCandidate
+      tags: [journal]
+      summary: Claim one eligible historical PAPER liquidation_cascade candidate for bounded preparation
+      description: Owner-only and one-shot. Claims a historical candidate for preparation only; does not place an order, start execution, or enable live trading.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HistoricalCascadeSelectionInput"
+      responses:
+        "201":
+          description: Durable claimed selection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoricalCascadeSelection"
+        "400":
+          description: Invalid candidate
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "409":
+          description: The one-shot selection is already consumed
+        "422":
+          description: Candidate is not an eligible historical PAPER signal
+        "503":
+          description: Historical candidate selection is unavailable
+  /journal/historical-cascade-candidates:
+    get:
+      operationId: listJournalHistoricalCascadeCandidates
+      tags: [journal]
+      summary: List bounded historical PAPER liquidation_cascade candidates
+      description: Owner-only read of eligible rejected-for-balance or closed PAPER signals. Candidates are historical and are not live trade opportunities.
+      responses:
+        "200":
+          description: Eligible historical candidates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoricalCascadeCandidateList"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "503":
+          description: Historical PAPER records unavailable
+  /journal/historical-cascade-selection/cancel:
+    post:
+      operationId: cancelJournalHistoricalCascadeSelection
+      tags: [journal]
+      summary: Cancel a claimed historical liquidation_cascade preparation
+      description: Owner-only. Cancellation is allowed only while claimed, before entry intent reservation. It never cancels or closes an exchange order.
+      responses:
+        "200":
+          description: Durable cancelled selection
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HistoricalCascadeSelection"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: No claimed selection to cancel
+        "409":
+          description: Selection can no longer be cancelled
+  /journal/trades:
+    get:
+      operationId: listJournalTrades
+      tags: [journal]
+      summary: Open and closed trading history
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, closed, all]
+            default: all
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Recorded trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalTradeList"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+  /journal/trades/{id}:
+    get:
+      operationId: getJournalTrade
+      tags: [journal]
+      summary: Read trade detail and journal notes
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      responses:
+        "200":
+          description: Trade detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalTrade"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Trade not found
+    patch:
+      operationId: updateJournalTradeNotes
+      tags: [journal]
+      summary: Save private analysis of a recorded trade
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JournalNotesUpdate"
+      responses:
+        "200":
+          description: Saved trade
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalTrade"
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Trade not found
+  /journal/trades/{id}/paper-close:
+    post:
+      operationId: closePaperTrade
+      tags: [journal]
+      summary: Owner manually closes the remaining simulated paper position
+      description: Requires an owner-entered simulated exit price. Never submits an exchange order or invents a market fill.
+      parameters:
+        - $ref: "#/components/parameters/TradeId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaperCloseRequest"
+      responses:
+        "200":
+          description: Confirmed paper close
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JournalTrade"
+        "400":
+          description: Invalid price or request
+        "401":
+          description: Sign-in required
+        "403":
+          description: Not the configured owner
+        "404":
+          description: Trade not found
+        "409":
+          description: Paper position already closed, changed, or idempotency key reused
+components:
+  parameters:
+    TradeId:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    VstSourceSignalId:
+      in: path
+      name: sourceSignalId
+      required: true
+      schema:
+        type: string
+  schemas:
+    OwnerTradingResetInput:
+      type: object
+      additionalProperties: false
+      required: [resetId, confirm]
+      properties:
+        resetId:
+          type: string
+          pattern: "^[A-Za-z0-9_-]{1,100}$"
+        confirm:
+          type: string
+          enum: [cancel_queue_and_close_paper_vst]
+    OwnerTradingResetState:
+      type: object
+      required: [resetId, cutoff, phase, pending, rejected, positionCloseRequests, queuedEntryCancellations, queuedCommands]
+      properties:
+        resetId:
+          type: string
+        cutoff:
+          type: string
+          format: date-time
+        phase:
+          type: string
+          enum: [closing, needs_review, completed]
+        pending:
+          type: integer
+        rejected:
+          type: integer
+        positionCloseRequests:
+          type: integer
+        queuedEntryCancellations:
+          type: integer
+        queuedCommands:
+          type: integer
+    OwnerTradingResetResult:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [received, duplicate, busy, conflict]
+        reason:
+          type: string
+        reset:
+          $ref: "#/components/schemas/OwnerTradingResetState"
+    OwnerTradingResetLookup:
+      type: object
+      required: [reset]
+      properties:
+        reset:
+          anyOf:
+            - $ref: "#/components/schemas/OwnerTradingResetState"
+            - type: "null"
+    SourceCommandInput:
+      type: object
+      additionalProperties: false
+      required: [commandId, sourceSignalId, symbol, type, sequence, occurredAt, reason]
+      properties:
+        commandId: { type: string, pattern: "^[A-Za-z0-9_-]{1,100}$" }
+        sourceSignalId: { type: string, pattern: "^[A-Za-z0-9_-]{1,100}$" }
+        symbol: { type: string, pattern: "^[A-Z0-9]{1,20}USDT$" }
+        type: { type: string, enum: [close, move_stop, cancel_entry] }
+        sequence: { type: integer, minimum: 1 }
+        occurredAt: { type: string, format: date-time }
+        reason: { type: string, pattern: "^[a-z][a-z0-9_-]{0,63}$" }
+        stopPrice: { type: string, pattern: "^\\d+(?:\\.\\d+)?$" }
+        scope: { type: string, enum: [all] }
+    SourceCommandDelivery:
+      type: object
+      required: [mode, status, attempts, updatedAt, lastError, result]
+      properties:
+        mode: { type: string, enum: [paper, vst] }
+        status: { type: string, enum: [pending, executed, already_closed, rejected, superseded] }
+        attempts: { type: integer }
+        updatedAt: { type: string, format: date-time }
+        lastError: { type: [string, "null"] }
+        result: { type: [string, "null"] }
+    SourceCommandReceipt:
+      type: object
+      required: [commandId, sourceSignalId, symbol, type, sequence, occurredAt, reason, receivedAt, deliveries]
+      properties:
+        commandId: { type: string }
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        type: { type: string, enum: [close, move_stop, cancel_entry] }
+        sequence: { type: integer }
+        occurredAt: { type: string, format: date-time }
+        reason: { type: string }
+        stopPrice: { type: string }
+        scope: { type: string, enum: [all] }
+        receivedAt: { type: string, format: date-time }
+        deliveries:
+          type: array
+          items: { $ref: "#/components/schemas/SourceCommandDelivery" }
+    SourceCommandList:
+      type: object
+      required: [commands]
+      properties:
+        commands:
+          type: array
+          items: { $ref: "#/components/schemas/SourceCommandReceipt" }
+    SourceCommandAcknowledgement:
+      type: object
+      required: [accepted, duplicate, command]
+      properties:
+        accepted: { type: boolean }
+        duplicate: { type: boolean }
+        command: { $ref: "#/components/schemas/SourceCommandReceipt" }
+    BotHealthStatus:
+      type: string
+      enum: [healthy, degraded, critical, unknown, paused]
+    BotHealthMetric:
+      type: object
+      required: [key, label, value, unit, normalMax]
+      properties:
+        key: { type: string }
+        label: { type: string }
+        value: { type: ["number", "null"] }
+        unit: { type: string, enum: [ms, count, http] }
+        normalMax: { type: ["number", "null"] }
+    BotHealthCheck:
+      type: object
+      required: [key, title, status, summary, lastSuccessAt, metrics]
+      properties:
+        key: { type: string }
+        title: { type: string }
+        status: { $ref: "#/components/schemas/BotHealthStatus" }
+        summary: { type: string }
+        lastSuccessAt: { type: ["string", "null"], format: date-time }
+        metrics:
+          type: array
+          items: { $ref: "#/components/schemas/BotHealthMetric" }
+    BotHealthIncident:
+      type: object
+      required: [component, severity, startedAt, alertedAt, recoverySince]
+      properties:
+        component: { type: string }
+        severity: { type: string, enum: [warning, critical] }
+        startedAt: { type: string, format: date-time }
+        alertedAt: { type: ["string", "null"], format: date-time }
+        recoverySince: { type: ["string", "null"], format: date-time }
+    BotHealthPolicy:
+      type: object
+      required: [sourceFreshnessMs, sourceWarningAfterMs, sourceCriticalAfterMs, sourceWarningFailures, repeatMs, recoveryStableMs, recoverySuccesses, workerStallAfterMs, queueWarningAfterMs, telegramWarningAfterMs]
+      properties:
+        sourceFreshnessMs: { type: integer }
+        sourceWarningAfterMs: { type: integer }
+        sourceCriticalAfterMs: { type: integer }
+        sourceWarningFailures: { type: integer }
+        repeatMs: { type: integer }
+        recoveryStableMs: { type: integer }
+        recoverySuccesses: { type: integer }
+        workerStallAfterMs: { type: integer }
+        queueWarningAfterMs: { type: integer }
+        telegramWarningAfterMs: { type: integer }
+    JournalBotHealth:
+      type: object
+      required: [asOf, startedAt, environment, status, summary, checks, incidents, policy, freshnessMs, readOnly]
+      properties:
+        asOf: { type: string, format: date-time }
+        startedAt: { type: ["string", "null"], format: date-time }
+        environment: { type: string, enum: [preview, production] }
+        status: { $ref: "#/components/schemas/BotHealthStatus" }
+        summary: { type: string }
+        freshnessMs: { type: integer }
+        readOnly: { type: boolean, const: true }
+        checks:
+          type: array
+          items: { $ref: "#/components/schemas/BotHealthCheck" }
+        incidents:
+          type: array
+          items: { $ref: "#/components/schemas/BotHealthIncident" }
+        policy: { $ref: "#/components/schemas/BotHealthPolicy" }
+    JournalAccess:
+      type: object
+      required: [authorized, configured]
+      properties:
+        authorized:
+          type: boolean
+        configured:
+          type: boolean
+    JournalOverview:
+      type: object
+      required: [openCount, closedCount, paperCount, liveCount, verifiedClosedCount, realizedNetPnl, openUnrealizedPnl, paperInitialDeposit, paperRealizedGrossPnl, paperDepositBalance, paperReserved, paperAvailable, currency, dataSource]
+      properties:
+        openCount: { type: integer }
+        closedCount: { type: integer }
+        paperCount: { type: integer }
+        liveCount: { type: integer }
+        verifiedClosedCount: { type: integer }
+        realizedNetPnl: { type: ["string", "null"] }
+        openUnrealizedPnl: { type: ["string", "null"] }
+        paperInitialDeposit: { type: string, description: "Fixed starting paper deposit in USDT." }
+        paperRealizedGrossPnl: { type: string, description: "Gross PnL from valid linked paper closes, including partial closes; excludes fees." }
+        paperDepositBalance: { type: string, description: "Starting paper deposit plus realized gross paper PnL; excludes open unrealized PnL and fees." }
+        paperReserved: { type: string, description: "Simulated funds allocated to open paper positions at 10 USDT each, not actual exchange margin." }
+        paperAvailable: { type: string, description: "Paper deposit balance minus funds allocated to open paper positions." }
+        currency: { type: string }
+        dataSource: { type: string }
+    JournalBot:
+      type: object
+      required: [source, mode, sourceSync, missedSourceSignals, paperAccount, paperEquity, signals, positions, recentClosedPositions]
+      properties:
+        source: { type: string, enum: [BingX] }
+        mode: { type: string, enum: [paper] }
+        sourceSync:
+          type: object
+          required: [state, checkedAt, lastSuccessAt, reason]
+          properties:
+            state: { type: string, enum: [pending, ok, error] }
+            checkedAt: { type: ["string", "null"], format: date-time }
+            lastSuccessAt: { type: ["string", "null"], format: date-time }
+            reason: { type: ["string", "null"] }
+        missedSourceSignals:
+          type: object
+          description: "Source signals the sender's own position feed reports as active/in_run that never reached this bot in any form (not even a rejection) -- detected by the periodic source sync, not a live call. Never a substitute for a PAPER fill: nothing here was opened or backfilled."
+          required: [count, items]
+          properties:
+            count: { type: integer }
+            items:
+              type: array
+              items:
+                type: object
+                required: [sourceSignalId, detectedAt]
+                properties:
+                  sourceSignalId: { type: string }
+                  detectedAt: { type: string, format: date-time }
+                  symbol: { type: ["string", "null"] }
+                  sourceStatus: { type: ["string", "null"] }
+        paperAccount:
+          type: object
+          required: [initialUsdt, freeUsdt, reservedUsdt, realizedPnlUsdt]
+          properties:
+            initialUsdt: { type: number }
+            freeUsdt: { type: number }
+            reservedUsdt: { type: number }
+            realizedPnlUsdt: { type: number }
+        paperEquity:
+          $ref: "#/components/schemas/JournalBotPaperEquity"
+        signals:
+          type: array
+          items:
+            type: object
+            required: [sourceSignalId, status, reason, receivedAt, updatedAt]
+            properties:
+              sourceSignalId: { type: string }
+              status: { type: string }
+              reason: { type: ["string", "null"] }
+              receivedAt: { type: string, format: date-time }
+              updatedAt: { type: string, format: date-time }
+        positions:
+          type: array
+          items:
+            type: object
+            required: [sourceSignalId, snapshot, market, marginRisk, status, updatedAt]
+            properties:
+              sourceSignalId: { type: string }
+              snapshot:
+                type: object
+                additionalProperties: true
+              market:
+                $ref: "#/components/schemas/JournalBotPositionMarket"
+              marginRisk:
+                $ref: "#/components/schemas/JournalBotPositionMargin"
+              status: { type: string }
+              updatedAt: { type: string, format: date-time }
+        recentClosedPositions:
+          type: array
+          description: "The ten most recently closed PAPER positions for the execution and funding audit. Not included in open equity."
+          items:
+            type: object
+            required: [sourceSignalId, snapshot, status, updatedAt]
+            properties:
+              sourceSignalId: { type: string }
+              snapshot:
+                type: object
+                additionalProperties: true
+              status: { type: string, enum: [closed] }
+              updatedAt: { type: string, format: date-time }
+    JournalVstEntryQueue:
+      type: object
+      required: [asOf, total, hasMore, entries]
+      properties:
+        asOf: { type: string, format: date-time }
+        total: { type: integer }
+        hasMore: { type: boolean }
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalVstEntryQueueItem"
+    JournalVstEntryQueueItem:
+      type: object
+      description: Safe projection of a received signal, not a source ACTIVE card. Null timings are unknown, never zero.
+      required: [sourceSignalId, symbol, status, receivedAt, updatedAt, queueWaitMs, prepareMs, executeMs, stage, stageConfirmedAt, deferReason]
+      properties:
+        sourceSignalId: { type: string }
+        symbol: { type: ["string", "null"] }
+        status: { type: string }
+        receivedAt: { type: ["string", "null"], format: date-time }
+        updatedAt: { type: ["string", "null"], format: date-time }
+        queueWaitMs: { type: ["number", "null"], description: "Elapsed since actual receipt at asOf; unknown when receipt is absent, invalid or in the future." }
+        prepareMs: { type: ["number", "null"], description: "Last measured batch preparation duration, not exchange confirmation." }
+        executeMs: { type: ["number", "null"], description: "Last measured sequential execution attempt duration, not proof of fill." }
+        stage: { type: string, description: "Safe last observed preparation stage or durable intent phase and state; not inferred from time alone." }
+        stageConfirmedAt: { type: ["string", "null"], format: date-time }
+        deferReason: { type: ["string", "null"], description: "Safe internal reason code only; no upstream messages or raw payload." }
+    JournalVstPositions:
+      type: object
+      required: [environment, source, exchangeVerification, positionsStatus, observedAt, accountStatus, accountObservedAt, account, positions, recentClosedPositions]
+      properties:
+        environment: { type: string, enum: [vst] }
+        source: { type: string, enum: [vst_ledger] }
+        exchangeVerification: { type: string, enum: [requested] }
+        positionsStatus: { type: string, enum: [available, unavailable], description: "Whether a fresh authenticated BingX VST positions read succeeded for this response." }
+        observedAt: { type: ["string", "null"], format: date-time, description: "Instant of the BingX VST positions read; null when unavailable." }
+        accountStatus: { type: string, enum: [available, unavailable] }
+        accountObservedAt: { type: ["string", "null"], format: date-time }
+        account:
+          type: ["object", "null"]
+          required: [walletBalanceUsdt, equityUsdt, availableMarginUsdt, unrealizedPnlUsdt]
+          properties:
+            walletBalanceUsdt: { type: ["string", "null"] }
+            equityUsdt: { type: ["string", "null"] }
+            availableMarginUsdt: { type: ["string", "null"] }
+            unrealizedPnlUsdt: { type: ["string", "null"] }
+        positions:
+          type: array
+          items:
+            type: object
+            required: [sourceSignalId, symbol, status, updatedAt, entryPrice, signalReferencePrice, planningQuotePrice, planningQuoteObservedAt, planningPriceDeviationPct, entryFillAt, actualFillDeviationPct, remainingQty, stopPrice, currentPrice, unrealizedPnlUsdt, roePercent, exchangeQuantity, sourceMismatch]
+            properties:
+              sourceSignalId: { type: string }
+              symbol: { type: string }
+              status: { type: string, enum: [open, closing, unknown] }
+              updatedAt: { type: string, format: date-time }
+              entryPrice: { type: ["string", "null"] }
+              signalReferencePrice: { type: ["string", "null"], description: "Immutable source-signal reference price. Null for historical snapshots that did not persist it." }
+              planningQuotePrice: { type: ["string", "null"], description: "Fresh exchange quote used for sizing before the MARKET entry; distinct from the verified fill." }
+              planningQuoteObservedAt: { type: ["string", "null"], format: date-time, description: "Time of the pre-entry planning quote, not the execution time." }
+              planningPriceDeviationPct: { type: ["number", "null"], description: "Signed (planning quote minus source reference) / source reference * 100." }
+              entryFillAt: { type: ["string", "null"], format: date-time, description: "Exchange-confirmed MARKET fill time." }
+              actualFillDeviationPct: { type: ["number", "null"], description: "Signed (verified exchange fill minus source reference) / source reference * 100. Null for historical snapshots without an independently stored verified comparison." }
+              remainingQty: { type: ["string", "null"] }
+              stopPrice: { type: ["string", "null"] }
+              protectionStatus: { type: ["string", "null"], description: "protected_degraded means independently verified floor with an unresolved stronger stop transfer; it is not successful execution." }
+              deferredStopPrice: { type: ["string", "null"], description: "Original requested stronger stop; never an installed-price claim." }
+              protectionObservedAt: { type: ["string", "null"], format: date-time }
+              currentPrice: { type: ["string", "null"], description: "Fresh BingX VST mark price; null when the exchange read is unavailable." }
+              unrealizedPnlUsdt: { type: ["string", "null"], description: "Exchange-reported unrealized PnL for the matching VST position; null when unavailable or no matching position exists." }
+              roePercent: { type: ["string", "null"], description: "Unrealized PnL divided by exchange-reported position margin, times 100." }
+              exchangeQuantity: { type: ["string", "null"], description: "Exchange-confirmed position quantity; null when the exchange read is unavailable." }
+              sourceMismatch: { type: boolean, description: "True when a fresh exchange read succeeded but reported no open VST position for this symbol while the ledger still shows one open or closing. Does not by itself change the ledger status." }
+        recentClosedPositions:
+          type: array
+          description: "The most recently closed VST positions, whether closed by the bot's own exit flow or by an owner manual review resolution. Not included in open positions."
+          items:
+            type: object
+            required: [sourceSignalId, symbol, status, snapshot, updatedAt]
+            properties:
+              sourceSignalId: { type: string }
+              symbol: { type: string }
+              status: { type: string, enum: [closed] }
+              snapshot:
+                type: object
+                additionalProperties: true
+                description: "Raw stored position snapshot, including closeFill/lastCloseFill and manualResolution when present. Never re-derived."
+              updatedAt: { type: string, format: date-time }
+    JournalVstReviewPositions:
+      type: object
+      required: [positions, marginTopUpPending, legacyPreRunnerCloseIntents, legacyPreRunnerCloseHistory]
+      properties:
+        positions:
+          type: array
+          items:
+            type: object
+            required: [sourceSignalId, symbol, updatedAt, reason, entryPrice, remainingQty, stopPrice]
+            properties:
+              sourceSignalId: { type: string }
+              symbol: { type: string }
+              updatedAt: { type: string, format: date-time }
+              reason: { type: ["string", "null"], description: "The abandoned-operation reason recorded when this position was moved to error, e.g. close_leg_abandoned_unconfirmed_outcome." }
+              entryPrice: { type: ["string", "null"] }
+              remainingQty: { type: ["string", "null"], description: "Last known ledger quantity before the ambiguous close attempt; not re-verified against the exchange." }
+              stopPrice: { type: ["string", "null"] }
+        marginTopUpPending:
+          type: array
+          description: Positions whose entry and initial stop are verified, but whose post-entry margin top-up never reached a confirmed outcome. These stay ledger status "open" (unlike the error positions above) but still halt the whole VST pipeline until resolved.
+          items:
+            type: object
+            required: [sourceSignalId, symbol, updatedAt, reason, entryPrice, stopPrice, topUpAmount]
+            properties:
+              sourceSignalId: { type: string }
+              symbol: { type: string }
+              updatedAt: { type: string, format: date-time }
+              reason: { type: ["string", "null"], description: "The signal-level reason recorded when the top-up outcome could not be verified, e.g. vst_margin_top_up_state_not_verified." }
+              entryPrice: { type: ["string", "null"] }
+              stopPrice: { type: ["string", "null"], description: "The already-verified entry stop price; unaffected by the pending top-up." }
+              topUpAmount: { type: ["string", "null"], description: "The additional margin (in VST) that was planned but not confirmed as added." }
+        legacyPreRunnerCloseIntents:
+          type: array
+          description: Unknown legacy close_pre_runner_split order intents. These can remain unresolved even when their position is not in the error-position list.
+          items:
+            $ref: "#/components/schemas/JournalVstReviewLegacyPreRunnerCloseIntent"
+        legacyPreRunnerCloseHistory:
+          type: array
+          description: Owner-only persisted decisions, newest first. Read-only; neither an owner review nor intent retirement proves that the original exchange POST never happened. Evidence describes the saved observation, not current exchange state.
+          items:
+            $ref: "#/components/schemas/JournalVstReviewPreRunnerCloseHistoryItem"
+    JournalVstReviewPreRunnerCloseHistoryItem:
+      type: object
+      required: [clientOrderId, sourceSignalId, symbol, timestamp, checkedAt, resolvedBy, outcome, note, originalOutcome, evidence]
+      properties:
+        clientOrderId: { type: string }
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        timestamp: { type: string, format: date-time, description: Original intent creation time. }
+        checkedAt: { type: string, format: date-time, description: Saved owner review time, not a fresh exchange read. }
+        resolvedBy: { type: string, description: Server-recorded owner identifier. }
+        outcome: { type: string, enum: [open, closed] }
+        note: { type: ["string", "null"] }
+        originalOutcome:
+          type: ["object", "null"]
+          additionalProperties: true
+          description: Original error/outcome preserved before owner resolution; never reconstructed from current state.
+        evidence:
+          type: object
+          additionalProperties: true
+          description: Exact saved exchange evidence including observation time, account/position linkage, stops or fills, history coverage and flat check when present. No missing bounds are inferred.
+    JournalVstReviewLegacyPreRunnerCloseIntent:
+      type: object
+      required: [clientOrderId, sourceSignalId, symbol, reason, timestamp]
+      properties:
+        clientOrderId: { type: string, description: "Original exchange client order id; resolving does not resend this order." }
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        reason: { type: ["string", "null"], description: "Recorded reason/outcome for the unknown intent, when available." }
+        timestamp: { type: string, format: date-time, description: "When the original intent was created." }
+    VstReviewResolvePreRunnerCloseInput:
+      type: object
+      additionalProperties: false
+      required: [clientOrderId, confirmation]
+      properties:
+        clientOrderId:
+          type: string
+          minLength: 1
+          description: Exact clientOrderId shown for this unknown legacy intent.
+        confirmation:
+          type: boolean
+          const: true
+          description: Explicit owner acknowledgement after verifying the position/fills on BingX.
+        note:
+          type: ["string", "null"]
+          maxLength: 2000
+          description: Optional owner note describing the BingX verification.
+    JournalVstReviewPreRunnerCloseResolution:
+      type: object
+      required: [outcome, position]
+      properties:
+        outcome:
+          type: string
+          enum: [resolved, replayed]
+          description: "resolved: owner verification resolved the legacy intent. replayed: the same resolution had already completed."
+        position:
+          type: object
+          required: [sourceSignalId, symbol, status, updatedAt]
+          properties:
+            sourceSignalId: { type: string }
+            symbol: { type: string }
+            status: { type: string }
+            updatedAt: { type: string, format: date-time }
+    VstReviewResolveClosedRequest:
+      type: object
+      additionalProperties: false
+      required: [fill]
+      properties:
+        note:
+          type: ["string", "null"]
+          maxLength: 2000
+          description: Optional owner note on how the close was confirmed.
+        fill:
+          type: object
+          additionalProperties: false
+          required: [price, quantity, at, exchangeOrderId, fee]
+          properties:
+            price:
+              type: string
+              pattern: "^(0|[1-9][0-9]{0,15})(\\.[0-9]{1,12})?$"
+              description: Owner-confirmed fill price actually observed on BingX, not a market quote.
+            quantity:
+              type: string
+              pattern: "^(0|[1-9][0-9]{0,15})(\\.[0-9]{1,12})?$"
+            at:
+              type: string
+              format: date-time
+              description: When the close fill actually occurred on BingX.
+            exchangeOrderId:
+              type: string
+              description: The BingX close order id, copied from the exchange.
+            fee:
+              type: object
+              additionalProperties: false
+              required: [asset, amount]
+              properties:
+                asset:
+                  type: string
+                  description: Fee currency exactly as shown on BingX for this fill (e.g. USDT, or VST for VST demo trades). Never assumed or defaulted.
+                amount:
+                  type: string
+                  pattern: "^(0|[1-9][0-9]{0,15})(\\.[0-9]{1,12})?$"
+                  description: Fee amount exactly as shown on BingX. Always required explicitly, including "0" when no fee was charged; never silently defaulted.
+    VstReviewResolveOpenRequest:
+      type: object
+      additionalProperties: false
+      required: [remainingQty]
+      properties:
+        note:
+          type: ["string", "null"]
+          maxLength: 2000
+        remainingQty:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,15})(\\.[0-9]{1,12})?$"
+          description: Current open quantity the owner actually observed on BingX for this position. Must be positive; a flat (zero) position is not "still open" -- use resolve-closed instead.
+    VstReviewResolveMarginTopUpKeepOpenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        note:
+          type: ["string", "null"]
+          maxLength: 2000
+          description: Optional owner note on what was seen on BingX.
+    JournalVstReviewResolution:
+      type: object
+      required: [sourceSignalId, symbol, status, updatedAt]
+      properties:
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        status: { type: string, enum: [open, closed] }
+        updatedAt: { type: string, format: date-time }
+    JournalVstReviewCloseNowResult:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [closed, already_flat, not_confirmed]
+          description: "closed: the bot placed and verified a real close order and the ledger is updated. already_flat: BingX already shows no open position for this symbol; nothing was changed, confirm with the manual form instead. not_confirmed: the close could not be safely verified this attempt; nothing was fabricated, retry or fall back to the manual form."
+        sourceSignalId: { type: ["string", "null"] }
+        symbol: { type: ["string", "null"] }
+        status: { type: ["string", "null"], description: "Present only when outcome is closed." }
+        updatedAt: { type: ["string", "null"], format: date-time, description: "Present only when outcome is closed." }
+        reason: { type: ["string", "null"], description: "Diagnostic detail, present only when outcome is not_confirmed." }
+    JournalVstReviewMarginTopUpCheck:
+      type: object
+      required: [outcome, symbol, isolatedMargin, expectedIsolatedMarginBefore, expectedIsolatedMarginAfter, observedAt]
+      properties:
+        outcome:
+          type: string
+          enum: [ok, position_not_found_on_exchange, read_unavailable, unavailable]
+          description: "ok: a fresh isolated-margin reading was obtained. position_not_found_on_exchange: no matching position currently exists on BingX for this symbol/positionId. read_unavailable: the exchange could not be read this attempt; retry later. unavailable: the position is not (or no longer) a verifiable pending margin top-up, or the VST worker is not active."
+        symbol: { type: ["string", "null"] }
+        isolatedMargin: { type: ["string", "null"], description: "Current isolated margin BingX reports for this position, present only when outcome is ok." }
+        expectedIsolatedMarginBefore: { type: ["string", "null"], description: "The margin recorded just before the top-up attempt, present only when outcome is ok." }
+        expectedIsolatedMarginAfter: { type: ["string", "null"], description: "expectedIsolatedMarginBefore plus the planned top-up amount, present only when outcome is ok." }
+        observedAt: { type: ["string", "null"], format: date-time, description: "When this reading was taken, present only when outcome is ok." }
+    JournalVstReviewConfirmOpenNowResult:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [confirmed_open, already_flat, not_confirmed]
+          description: "confirmed_open: the bot read the live BingX position and recorded it as still open with the exchange-reported quantity. already_flat: BingX already shows no open position for this symbol; nothing was changed, confirm the close instead. not_confirmed: the read could not be safely verified this attempt; nothing was changed, retry or fall back to the manual form."
+        sourceSignalId: { type: ["string", "null"] }
+        symbol: { type: ["string", "null"] }
+        status: { type: ["string", "null"], description: "Present only when outcome is confirmed_open." }
+        updatedAt: { type: ["string", "null"], format: date-time, description: "Present only when outcome is confirmed_open." }
+        reason: { type: ["string", "null"], description: "Diagnostic detail, present only when outcome is not_confirmed." }
+    JournalStrategyHistory:
+      type: object
+      required: [paperInitialDepositUsdt, realInitialDepositUsdt, realBaselineAt, trades]
+      properties:
+        paperInitialDepositUsdt: { type: ["string", "null"] }
+        realInitialDepositUsdt: { type: ["string", "null"], description: "Owner-selected, fixed free USDT snapshot at the start instant; not the current account balance or bot equity." }
+        realBaselineAt: { type: ["string", "null"], format: date-time, description: "Instant of the owner-selected REAL baseline observation." }
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalStrategyTrade"
+    JournalStrategyTrade:
+      type: object
+      required: [id, patternId, executedStrategyId, environment, symbol, status, accountingStatus, entryAt, closedAt, profitUsdt, profitPercent, tradeProfitPercent, allocatedUsdt, allocatedPercent, scenarios]
+      properties:
+        id: { type: string }
+        patternId: { type: ["string", "null"] }
+        executedStrategyId: { type: ["integer", "null"], description: "Only set for an entry pinned to a verified strategy policy; null means the historical rule set cannot be attributed to one of the four strategies." }
+        environment: { type: string, enum: [paper, live, testnet] }
+        symbol: { type: string }
+        status: { type: string, enum: [open, closed] }
+        accountingStatus: { type: string, enum: [open, verified, incomplete], description: "REAL is verified only with balanced own confirmed fills, USDT fees, and certified exchange funding coverage through final exit." }
+        entryAt: { type: ["string", "null"], format: date-time }
+        closedAt: { type: ["string", "null"], format: date-time }
+        profitUsdt: { type: ["string", "null"], description: "Net realized PnL, present only for a fully accounted closed trade." }
+        profitPercent: { type: ["string", "null"], description: "Net realized PnL as a percentage of the original deposit for this environment." }
+        tradeProfitPercent: { type: ["string", "null"], description: "Net realized PnL as a percentage of the verified initial margin allocated to this trade." }
+        allocatedUsdt: { type: ["string", "null"], description: "Verified margin allocated when this trade was opened, frozen separately from subsequent margin additions." }
+        allocatedPercent: { type: ["string", "null"], description: "Opening margin as a percentage of the frozen original deposit." }
+        scenarios:
+          type: array
+          description: "Only prospective PAPER observations; never exchange fills or LIVE orders. Old entries and REAL have no modeled return."
+          items:
+            $ref: "#/components/schemas/JournalStrategyScenario"
+    JournalStrategyScenario:
+      type: object
+      required: [strategyId, status, closedAt, profitUsdt, profitPercent, allocatedPercent, grossUsdt, estimatedCostUsdt, exits]
+      properties:
+        strategyId: { type: integer, enum: [1, 2, 3, 4] }
+        status: { type: string, enum: [unobserved, open, closed, incomplete] }
+        closedAt: { type: ["string", "null"], format: date-time }
+        profitUsdt: { type: ["string", "null"], description: "Estimated net on closed shadow position; entry and exit fees at the entry's PAPER taker rate, funding excluded." }
+        profitPercent: { type: ["string", "null"], description: "Estimated net divided by initial PAPER deposit." }
+        allocatedPercent: { type: ["string", "null"], description: "Original PAPER margin share of initial deposit." }
+        grossUsdt: { type: ["string", "null"], description: "Gross result of already closed shadow tranches; may be partial when the scenario remains open." }
+        estimatedCostUsdt: { type: ["string", "null"], description: "Entry and observed exit fees at entry's PAPER taker rate; excludes funding." }
+        exits:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalStrategyScenarioExit"
+    JournalStrategyScenarioExit:
+      type: object
+      required: [at, quantity, price, reason, grossUsdt]
+      properties:
+        at: { type: string, format: date-time }
+        quantity: { type: string }
+        price: { type: string }
+        reason: { type: string }
+        grossUsdt: { type: string }
+    JournalBotPaperEquity:
+      type: object
+      description: "Display-only PAPER account estimate. Uses the worker's saved BingX mark, or labelled last-trade fallback; never real exchange account equity. Provisional values exclude funding that is known to be unresolved."
+      required: [status, walletUsdt, equityUsdt, unrealizedPnlUsdt, changeUsdt, changePercent, oldestQuoteAt, fundingStatus, fundingIncompleteCount, fundingLegacyUnknownCount, fundingVerifiedSettlementCount, fundingVerifiedNetCostUsdt, fundingUnverifiedPositions, quoteStatus, provisionalEquityUsdt, provisionalUnrealizedPnlUsdt, provisionalChangeUsdt, provisionalChangePercent]
+      properties:
+        status: { type: string, enum: [fresh, no_position, stale, unavailable, funding_incomplete] }
+        walletUsdt: { type: string, description: "Free plus reserved PAPER funds, including realized results." }
+        equityUsdt: { type: ["string", "null"], description: "Wallet plus gross unrealized PnL; null if an open quote is not fresh or funding is incomplete." }
+        unrealizedPnlUsdt: { type: ["string", "null"] }
+        changeUsdt: { type: ["string", "null"], description: "Equity minus initial PAPER deposit." }
+        changePercent: { type: ["string", "null"], description: "Change relative to initial deposit; null for zero initial deposit or unavailable equity." }
+        oldestQuoteAt: { type: ["string", "null"], format: date-time }
+        fundingStatus: { type: string, enum: [current, incomplete], description: "Across the stored PAPER book. Incomplete means one or more funding records are unresolved or legacy-unknown." }
+        fundingIncompleteCount: { type: integer, minimum: 0 }
+        fundingLegacyUnknownCount: { type: integer, minimum: 0 }
+        fundingVerifiedSettlementCount: { type: integer, minimum: 0, description: "Number of individually verified PAPER funding charges already included in the wallet." }
+        fundingVerifiedNetCostUsdt: { type: string, description: "Signed net cost of verified funding events already debited from the wallet; negative means a credit." }
+        fundingUnverifiedPositions:
+          type: array
+          description: "Positions whose funding history cannot yet be certified as complete. Applied settlement counts are already reflected in the wallet, not added again."
+          items:
+            $ref: "#/components/schemas/JournalBotFundingUnverifiedPosition"
+        quoteStatus: { type: string, enum: [fresh, stale, unavailable, no_position], description: "Aggregate status of all open-position quotes and unrealized PnL inputs." }
+        provisionalEquityUsdt: { type: ["string", "null"], description: "Wallet plus unrealized PnL when there are no open positions or every open quote/PnL input is fresh and valid; null when any required quote/PnL input is unavailable. Present regardless of funding status." }
+        provisionalUnrealizedPnlUsdt: { type: ["string", "null"], description: "Sum of fresh valid open-position unrealized PnL only; null when a quote/PnL input is unavailable." }
+        provisionalChangeUsdt: { type: ["string", "null"], description: "Provisional equity minus the initial PAPER deposit; includes realized charges already stored in the wallet and may exclude unresolved funding." }
+        provisionalChangePercent: { type: ["string", "null"], description: "Provisional change relative to initial deposit; null if unavailable or the initial deposit is zero." }
+    JournalBotFundingUnverifiedPosition:
+      type: object
+      required: [symbol, fromAt, status, verifiedSettlements, verifiedFundingTimes]
+      properties:
+        symbol: { type: string }
+        fromAt: { type: ["string", "null"], format: date-time }
+        status: { type: string }
+        verifiedSettlements: { type: integer, minimum: 0 }
+        verifiedFundingTimes:
+          type: array
+          items: { type: integer, description: "Verified exchange settlement timestamp in milliseconds." }
+    JournalBotPositionMarket:
+      type: object
+      required:
+        [quotePrice, quoteAt, quoteSource, quoteStatus, priceBasis, unrealizedPnlUsdt, roePercent, notionalUsdt, projectedExitFeeUsdt, pnlAfterExitFeeUsdt, roeAfterExitFeePercent]
+      properties:
+        quotePrice: { type: ["string", "null"] }
+        quoteAt: { type: ["string", "null"], format: date-time }
+        quoteSource: { type: ["string", "null"] }
+        quoteStatus: { type: string, enum: [fresh, stale, unavailable] }
+        priceBasis: { type: string, enum: [mark, last, none], description: "Mark price when a recent verified BingX premiumIndex observation exists; otherwise a labelled last-trade fallback." }
+        unrealizedPnlUsdt: { type: ["string", "null"] }
+        roePercent: { type: ["string", "null"] }
+        notionalUsdt: { type: ["string", "null"] }
+        projectedExitFeeUsdt: { type: ["string", "null"], description: "Estimated taker fee for a market exit at the displayed quote; not yet charged." }
+        pnlAfterExitFeeUsdt: { type: ["string", "null"], description: "Gross open PnL minus projected exit fee; paid entry fee is already in the wallet." }
+        roeAfterExitFeePercent: { type: ["string", "null"] }
+    JournalBotPositionMargin:
+      type: object
+      description: "PAPER-only estimated isolated-margin stop assessment. The actual symbol maintenance tier and exchange liquidation price are not verified."
+      required: [status, stopPercentFromEntry, stopPriceUsed, stopLossUsdt, stopLossPercentOfMargin, requiredMarginUsdt, additionalMarginNeededUsdt, bufferAtStopUsdt, estimatedLiquidationPrice, marginHeldUsdt, addedMarginUsdt, maintenanceRateAssumed, safetyRateAssumed, closeFeeRateAssumed]
+      properties:
+        status: { type: string, enum: [estimated_buffer, estimated_shortfall, unavailable] }
+        stopPercentFromEntry: { type: ["string", "null"], description: "Signed unleveraged price change from PAPER entry to effective stop." }
+        stopPriceUsed: { type: ["string", "null"] }
+        stopLossUsdt: { type: ["string", "null"], description: "Gross loss at stop, ignoring execution slippage." }
+        stopLossPercentOfMargin: { type: ["string", "null"], description: "Gross loss at stop as a percent of currently held PAPER margin, not price distance." }
+        requiredMarginUsdt: { type: ["string", "null"] }
+        additionalMarginNeededUsdt: { type: ["string", "null"] }
+        bufferAtStopUsdt: { type: ["string", "null"] }
+        estimatedLiquidationPrice: { type: ["string", "null"], description: "Illustrative price using assumed maintenance rate. Not a BingX-reported liquidation price." }
+        marginHeldUsdt: { type: ["string", "null"] }
+        addedMarginUsdt: { type: ["string", "null"] }
+        maintenanceRateAssumed: { type: string }
+        safetyRateAssumed: { type: string }
+        closeFeeRateAssumed: { type: string }
+    BingXConnectionStatus:
+      type: object
+      required: [status, environment, checkedAt, httpStatus]
+      properties:
+        status:
+          type: string
+          enum: [connected, not_configured, exchange_rejected, unavailable]
+        environment: { type: string, enum: [mainnet] }
+        checkedAt: { type: ["string", "null"], format: date-time }
+        httpStatus: { type: ["integer", "null"] }
+    HistoricalCascadeSelection:
+      type: object
+      required: [state, sourceSignalId, symbol, marginMode, totalMarginUsdt, selectedAt, cancelledAt, entryIntentReservedAt, attemptStartedAt, updatedAt]
+      description: Durable bounded preparation state; this is not an order or execution status.
+      properties:
+        state: { type: string, enum: [disarmed, claimed, cancelled, entry_intent_reserved, attempted] }
+        sourceSignalId: { type: ["string", "null"] }
+        symbol: { type: ["string", "null"] }
+        marginMode: { type: string, enum: [isolated] }
+        totalMarginUsdt: { type: string, enum: ["15"] }
+        selectedAt: { type: ["string", "null"], format: date-time }
+        cancelledAt: { type: ["string", "null"], format: date-time }
+        entryIntentReservedAt: { type: ["string", "null"], format: date-time }
+        attemptStartedAt: { type: ["string", "null"], format: date-time }
+        updatedAt: { type: ["string", "null"], format: date-time }
+    HistoricalCascadeSelectionInput:
+      type: object
+      required: [sourceSignalId]
+      additionalProperties: false
+      properties:
+        sourceSignalId: { type: string, minLength: 1 }
+    HistoricalCascadeCandidate:
+      type: object
+      required: [sourceSignalId, symbol, signalAt, historicalPaperOutcome]
+      properties:
+        sourceSignalId: { type: string }
+        symbol: { type: string }
+        signalAt: { type: ["string", "null"], format: date-time }
+        historicalPaperOutcome:
+          type: string
+          enum: [rejected_insufficient_free_paper_balance, closed]
+    HistoricalCascadeCandidateList:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/HistoricalCascadeCandidate"
+    BingXAccountPositions:
+      type: object
+      required: [status, environment, source, observedAt, positions, accountStatus, accountSource, accountObservedAt, account, recentClosedTrades]
+      properties:
+        status: { type: string, enum: [available, not_configured, unavailable] }
+        environment: { type: string, enum: [mainnet] }
+        source: { type: string, enum: [BingX private swap positions] }
+        observedAt: { type: ["string", "null"], format: date-time }
+        positions:
+          type: array
+          items:
+            $ref: "#/components/schemas/BingXAccountPosition"
+        accountStatus: { type: string, enum: [available, not_configured, unavailable], description: "Independent outcome of the signed account-balance read; position availability is reported separately." }
+        accountSource: { type: string, enum: [BingX mainnet swap account-wide USDT balance] }
+        accountObservedAt: { type: ["string", "null"], format: date-time, description: "Server observation time for the independent balance response." }
+        account:
+          oneOf:
+            - type: "null"
+            - $ref: "#/components/schemas/BingXAccountBalance"
+        recentClosedTrades:
+          $ref: "#/components/schemas/BingXAccountRecentClosedTrades"
+    BingXAccountRecentClosedTrades:
+      type: object
+      description: "The account's most recently closed real trades, from BingX's own income history. Independent outcome from positions/account; never persisted in a local ledger. BingX's income history has no price, quantity, or margin per trade, so ROE cannot be computed here -- only the exchange-reported realized PnL and closing fee."
+      required: [status, source, observedAt, trades]
+      properties:
+        status: { type: string, enum: [available, not_configured, unavailable] }
+        source: { type: string, enum: [BingX private income history] }
+        observedAt: { type: ["string", "null"], format: date-time }
+        trades:
+          type: array
+          items:
+            type: object
+            required: [tradeId, symbol, closedAt, pnlUsdt, feeUsdt, liquidation]
+            properties:
+              tradeId: { type: string }
+              symbol: { type: string }
+              closedAt: { type: string, format: date-time }
+              pnlUsdt: { type: string, description: "BingX-reported realized PnL (REALIZED_PNL or, for a liquidation, INSURANCE_CLEAR income row), not fee-adjusted separately from feeUsdt." }
+              feeUsdt: { type: ["string", "null"], description: "Matching 'Position closing fee' TRADING_FEE income row for the same tradeId; null when BingX did not report one." }
+              liquidation: { type: boolean, description: "True when this close was an INSURANCE_CLEAR (forced liquidation) income row rather than a normal REALIZED_PNL close." }
+    BingXAccountBalance:
+      type: object
+      description: "Sanitized USDT fields returned by the account-wide BingX mainnet swap balance endpoint. Null values mean the exchange did not provide a valid value."
+      required: [walletBalanceUsdt, equityUsdt, availableMarginUsdt, unrealizedPnlUsdt]
+      properties:
+        walletBalanceUsdt: { type: ["string", "null"], description: "BingX response field balance." }
+        equityUsdt: { type: ["string", "null"], description: "BingX response field equity; not derived locally." }
+        availableMarginUsdt: { type: ["string", "null"], description: "BingX response field availableMargin." }
+        unrealizedPnlUsdt: { type: ["string", "null"], description: "BingX response field unrealizedProfit." }
+    BingXAccountPosition:
+      type: object
+      required: [symbol, side, size, entryPrice, markPrice, unrealizedPnlUsdt, roePercent, stopPrice, liquidationPrice, marginUsdt, leverage, marginMode, openedAt]
+      properties:
+        symbol: { type: string }
+        side: { type: ["string", "null"], enum: [LONG, SHORT, null] }
+        size: { type: string }
+        entryPrice: { type: ["string", "null"] }
+        markPrice: { type: ["string", "null"] }
+        unrealizedPnlUsdt: { type: ["string", "null"] }
+        roePercent: { type: ["string", "null"], description: "Unrealized PnL divided by the exchange-reported positive position margin, times 100; null when either input is missing or invalid. Not fee-adjusted." }
+        stopPrice: { type: ["string", "null"] }
+        liquidationPrice: { type: ["string", "null"] }
+        marginUsdt: { type: ["string", "null"] }
+        leverage: { type: ["number", "null"] }
+        marginMode: { type: ["string", "null"], enum: [ISOLATED, CROSSED, null] }
+        openedAt: { type: ["string", "null"], format: date-time }
+    BingXLivePreflight:
+      type: object
+      required: [status, environment, checkedAt, checks, notices, symbolCheck, blockers]
+      properties:
+        status: { type: string, enum: [blocked, unavailable] }
+        environment: { type: string, enum: [mainnet] }
+        checkedAt: { type: string, format: date-time }
+        checks:
+          type: object
+          required: [initialMargin, flatAccount, oneWayMode]
+          properties:
+            initialMargin: { type: ["boolean", "null"] }
+            flatAccount: { type: ["boolean", "null"] }
+            oneWayMode: { type: ["boolean", "null"] }
+        notices:
+          type: array
+          items:
+            type: string
+            enum: [existing_positions_or_unknown, hedge_mode]
+        symbolCheck:
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [symbol, symbolClear, positionSide, reason]
+              properties:
+                symbol: { type: string }
+                symbolClear: { type: boolean }
+                positionSide:
+                  type: ["string", "null"]
+                  enum: [LONG, BOTH, null]
+                reason:
+                  type: ["string", "null"]
+                  enum: [invalid_symbol, exchange_state_unknown, position_mode_unknown, existing_position, existing_order, null]
+        blockers:
+          type: array
+          items:
+            type: string
+            enum: [execution_disabled, stop_and_exit_unverified, margin_topup_unverified, invalid_symbol, credentials_missing, account_check_unavailable, initial_margin_unverified, symbol_check_unavailable, symbol_conflict_or_unknown]
+    JournalTradeList:
+      type: object
+      required: [trades]
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalTrade"
+    JournalTrade:
+      type: object
+      required: [id, symbol, side, status, environment, sourceSignalId, quantity, entryAt, entryPrice, exitPrice, markPrice, markAt, leverage, entryFee, exitFee, funding, grossPnl, netPnl, roiPercent, unrealizedPnl, notional, currency, calculationStatus, notes, tags, exchangeOrderId, stopLoss, takeProfit, protectionStatus]
+      properties:
+        id: { type: string, format: uuid }
+        sourceSignalId: { type: string }
+        exchangeOrderId: { type: ["string", "null"] }
+        symbol: { type: string }
+        side: { type: string, enum: [buy, sell] }
+        status: { type: string, enum: [open, closed] }
+        environment: { type: string, enum: [paper, testnet, live] }
+        quantity: { type: string }
+        entryAt: { type: string, format: date-time }
+        exitAt: { type: ["string", "null"], format: date-time }
+        entryPrice: { type: ["string", "null"] }
+        exitPrice: { type: ["string", "null"] }
+        markPrice: { type: ["string", "null"] }
+        markAt: { type: ["string", "null"], format: date-time }
+        leverage: { type: ["string", "null"] }
+        entryFee: { type: ["string", "null"] }
+        exitFee: { type: ["string", "null"] }
+        funding: { type: ["string", "null"] }
+        grossPnl: { type: ["string", "null"] }
+        netPnl: { type: ["string", "null"] }
+        roiPercent: { type: ["string", "null"] }
+        unrealizedPnl: { type: ["string", "null"] }
+        notional: { type: ["string", "null"] }
+        currency: { type: string }
+        calculationStatus: { type: string, enum: [verified, incomplete, paper] }
+        notes: { type: string }
+        tags:
+          type: array
+          items: { type: string }
+        stopLoss: { type: ["string", "null"] }
+        takeProfit: { type: ["string", "null"] }
+        protectionStatus: { type: string }
+    JournalNotesUpdate:
+      type: object
+      required: [notes, tags]
+      properties:
+        notes: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 8
+          items: { type: string, minLength: 1, maxLength: 32 }
+    PaperCloseRequest:
+      type: object
+      additionalProperties: false
+      required: [exitPrice, requestId]
+      properties:
+        exitPrice:
+          type: string
+          pattern: "^(0|[1-9][0-9]{0,15})(\\.[0-9]{1,12})?$"
+          description: Positive owner-entered simulated exit price, not a live market quote.
+        requestId:
+          type: string
+          format: uuid
+          description: Stable identifier for safe retries of the same close request.
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+    TradingMode:
+      type: string
+      enum: [paper, testnet]
+    SignalSide:
+      type: string
+      enum: [buy, sell]
+    OrderType:
+      type: string
+      enum: [market, limit]
+    SignalStatus:
+      type: string
+      enum: [awaiting_rules, pending, processing, executed, rejected, failed]
+    TradingSignal:
+      type: object
+      required:
+        - id
+        - sourceSignalId
+        - confirmationStatus
+        - patternId
+        - patternStatus
+        - symbol
+        - signalAt
+        - referencePrice
+        - side
+        - orderType
+        - quantity
+        - reduceOnly
+        - status
+        - attempts
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        sourceSignalId:
+          type: string
+        confirmationStatus:
+          type: ["string", "null"]
+          enum: [confirmed, null]
+        patternId:
+          type: ["string", "null"]
+        patternStatus:
+          type: ["string", "null"]
+          enum: [approved, null]
+        symbol:
+          type: string
+        signalAt:
+          type: ["string", "null"]
+          format: date-time
+        referencePrice:
+          type: ["string", "null"]
+        side:
+          type: ["string", "null"]
+          enum: [buy, sell, null]
+        orderType:
+          type: ["string", "null"]
+          enum: [market, limit, null]
+        quantity:
+          type: ["string", "null"]
+        limitPrice:
+          type: string
+          nullable: true
+        stopLoss:
+          type: string
+          nullable: true
+        takeProfit:
+          type: string
+          nullable: true
+        reduceOnly:
+          type: boolean
+        status:
+          $ref: "#/components/schemas/SignalStatus"
+        attempts:
+          type: integer
+        errorCode:
+          type: string
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    EnqueueSignalRequest:
+      type: object
+      required: [sourceSignalId, confirmationStatus, patternId, patternStatus, symbol, signalAt, referencePrice, side, orderType, quantity, limitPrice, stopLoss, reduceOnly, payload]
+      additionalProperties: false
+      properties:
+        sourceSignalId:
+          type: string
+          pattern: "^cab-signal-[0-9]+$"
+        confirmationStatus:
+          type: string
+          enum: [candidate, confirmed]
+        patternId:
+          type: string
+          minLength: 1
+          maxLength: 120
+        patternStatus:
+          type: string
+          enum: [approved, experimental]
+        symbol:
+          type: string
+          pattern: "^[A-Z0-9._-]{2,30}$"
+        signalAt:
+          type: string
+          format: date-time
+          description: Signal occurrence time in UTC.
+        referencePrice:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"
+          description: Sender's entry reference, not a guaranteed fill.
+        side:
+          type: string
+          enum: [buy]
+        orderType:
+          type: string
+          enum: [market]
+        quantity:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"
+        limitPrice:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"
+          description: Market entry reference, not a limit order.
+        stopLoss:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"
+          description: Exact initial protective stop from the new signal, never derived from referencePrice.
+        reduceOnly:
+          type: boolean
+          enum: [false]
+        payload:
+          $ref: "#/components/schemas/BulletExitPayload"
+    BulletExitPayload:
+      type: object
+      additionalProperties: false
+      required: [source, rulesVersion, marginMode, leverage, initialMarginUsd, exitRules]
+      properties:
+        source:
+          type: string
+          enum: [CryptoAltBullet]
+        rulesVersion:
+          type: string
+          enum: [bullet-long-exits-v2]
+        marginMode:
+          type: string
+          enum: [isolated]
+        leverage:
+          type: number
+          enum: [10]
+        initialMarginUsd:
+          type: string
+          enum: ["10"]
+        exitRules:
+          type: object
+          additionalProperties: false
+          required: [priceMoveBasis, breakevenAtPct, breakevenStopGainPct, breakevenIncludesFees, protectedProfitAtPct, protectedProfitPct, firstTargetPct, trailingActivationPct, trailingGapPercentagePoints, trailingGapBasis, trailingStopNeverDecreases, trailingExitAction, maxWatchDays, expiryExitPrice, noFixedTakeProfit, rMultipleTargets, firstTargetAction, partialProfitAdvice]
+          properties:
+            priceMoveBasis: { type: string, enum: [unleveraged_percent_from_actual_entry_fill] }
+            breakevenAtPct: { type: number, enum: [5] }
+            breakevenStopGainPct: { type: number, enum: [0] }
+            breakevenIncludesFees: { type: boolean, enum: [false] }
+            protectedProfitAtPct: { type: number, enum: [10] }
+            protectedProfitPct: { type: number, enum: [5] }
+            firstTargetPct: { type: number, enum: [10] }
+            trailingActivationPct: { type: number, enum: [15] }
+            trailingGapPercentagePoints: { type: number, enum: [10] }
+            trailingGapBasis: { type: string, enum: [percentage_points_of_entry_pnl] }
+            trailingStopNeverDecreases: { type: boolean, enum: [true] }
+            trailingExitAction: { type: string, enum: [close_remaining_position] }
+            maxWatchDays: { type: number, enum: [4] }
+            expiryExitPrice: { type: string, enum: [observed_market_quote] }
+            noFixedTakeProfit: { type: boolean, enum: [true] }
+            rMultipleTargets: { type: boolean, enum: [false] }
+            firstTargetAction: { type: string, enum: [milestone_not_full_close] }
+            partialProfitAdvice:
+              type: object
+              additionalProperties: false
+              required: [execution, minFraction, maxFraction]
+              properties:
+                execution: { type: string, enum: [advice_only_not_automated] }
+                minFraction: { type: number, enum: [0.2] }
+                maxFraction: { type: number, enum: [0.25] }
+            runner:
+              type: object
+              additionalProperties: false
+              required: [corePct, runnerPct, breakevenStop, trailingActivationPct, trailingGapPercentagePoints, maxHoldHours]
+              properties:
+                corePct: { type: number, enum: [80] }
+                runnerPct: { type: number, enum: [20] }
+                breakevenStop: { type: string, enum: [on_open] }
+                trailingActivationPct: { type: number, enum: [30] }
+                trailingGapPercentagePoints: { type: number, enum: [30] }
+                maxHoldHours: { type: number, enum: [120] }
+    EnqueueSignalResponse:
+      type: object
+      required: [accepted, duplicate, signal]
+      properties:
+        accepted:
+          type: boolean
+        duplicate:
+          type: boolean
+        signal:
+          $ref: "#/components/schemas/TradingSignal"
+    TradingStatus:
+      type: object
+      required:
+        - mode
+        - acceptingNewEntries
+        - killSwitchActive
+        - maxNotionalPerOrder
+        - queueDepth
+        - workerOnline
+        - exchangeConnected
+      properties:
+        mode:
+          $ref: "#/components/schemas/TradingMode"
+        acceptingNewEntries:
+          type: boolean
+        killSwitchActive:
+          type: boolean
+        maxNotionalPerOrder:
+          type: string
+        queueDepth:
+          type: integer
+        workerOnline:
+          type: boolean
+        workerHeartbeatAt:
+          type: string
+          format: date-time
+          nullable: true
+        exchangeConnected:
+          type: boolean
+        lastReconciledAt:
+          type: string
+          format: date-time
+          nullable: true
+    UpdateTradingControlsRequest:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/TradingMode"
+        acceptingNewEntries:
+          type: boolean
+        killSwitchActive:
+          type: boolean
+        maxNotionalPerOrder:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]+)?$"

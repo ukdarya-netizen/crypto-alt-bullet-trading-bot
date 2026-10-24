@@ -1,0 +1,47 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Spline+Sans+Mono:wght@400;500;600&display=swap");
+
+:root {
+  --background: 48 20% 97%;
+  --foreground: 0 0% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 0 0% 11%;
+  --border: 48 10% 88%;
+  --input: 48 10% 88%;
+  --ring: 16 70% 50%;
+  --primary: 16 70% 50%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 48 10% 90%;
+  --secondary-foreground: 0 0% 11%;
+  --muted: 48 10% 92%;
+  --muted-foreground: 0 0% 40%;
+  --accent: 210 50% 30%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 50% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --success: 145 40% 40%;
+  --success-foreground: 0 0% 100%;
+  --app-font-sans: "Inter", sans-serif;
+  --app-font-mono: "Spline Sans Mono", monospace;
+  --radius: 0rem;
+}
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-border: hsl(var(--border));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-success: hsl(var(--success));
+  --font-sans: var(--app-font-sans);
+  --font-mono: var(--app-font-mono);
+}
+
+@layer base {
+  .crypto-alt-journal, .crypto-alt-journal * { border-color: hsl(var(--border)); }
+  .crypto-alt-journal { font-family: var(--app-font-sans); background: hsl(var(--background)); color: hsl(var(--foreground)); }
+}

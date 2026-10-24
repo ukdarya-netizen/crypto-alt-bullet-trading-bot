@@ -1,0 +1,12 @@
+{
+  "name": "@workspace/api-spec",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "codegen": "orval --config ./orval.config.ts && node ./normalize-generated.mjs && pnpm -w run typecheck:libs",
+    "check:codegen-build": "pnpm run codegen && pnpm --filter @workspace/api-server run typecheck && pnpm --filter @workspace/api-server run build && pnpm --filter @workspace/api-server run test:api-schema"
+  },
+  "devDependencies": {
+    "orval": "^8.30.0"
+  }
+}

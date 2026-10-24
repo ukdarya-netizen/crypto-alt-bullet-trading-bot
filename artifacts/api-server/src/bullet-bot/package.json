@@ -1,0 +1,16 @@
+{
+  "name": "bingx-paper-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.20.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
