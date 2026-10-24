@@ -328,8 +328,7 @@ export function formatVstTelegramEvent(event) {
     // Never infer an execution outcome or expose raw exception data for an
     // event that has no reviewed description.
     default:
-      action = "Получено нераспознанное событие. Оно не подтверждает открытие или закрытие позиции.";
-      break;
+      return null;
   }
   const timestamp = new Date(event.createdAt);
   const hasReason = typeof details.reason === "string" && details.reason !== "";
@@ -803,8 +802,10 @@ export function createSourceSyncLivenessAlerter({ token, chatId, fetcher = fetch
 // owner-facing trace (opened / rejected with reason / closed / needs action),
 // while per-status-change and per-phase diagnostics no longer flood the chat
 // and no longer delay real alerts behind the one-message-per-tick pace.
-// Kinds not listed here (including future kinds) are still delivered.
+// Only reviewed, owner-facing outcomes are delivered. New internal events
+// must not become meaningless Telegram alerts via the formatter fallback.
 const SILENT_VST_EVENT_KINDS = new Set([
+  "vst_margin_mode_preparation_verified",
   "vst_signal_status_changed",
   "vst_position_management_diagnostic",
   "vst_impulse_split_phase_verified",
@@ -830,11 +831,35 @@ const SILENT_VST_EVENT_KINDS = new Set([
   // The source_exit_completed result describes this same cancellation.
   "vst_source_exit_unentered",
 ]);
+const USER_FACING_VST_EVENT_KINDS = new Set([
+  "vst_pre_runner_close_retry_limit",
+  "vst_entry_verified",
+  "vst_entry_margin_top_up_pending",
+  "vst_impulse_entry_margin_top_up_pending",
+  "vst_margin_top_up_verified",
+  "vst_margin_top_up_funded_but_unsafe",
+  "vst_impulse_entry_verified_split_pending",
+  "vst_action_reconciled",
+  "vst_triggered_stop_verified",
+  "vst_impulse_triggered_stop_verified",
+  "vst_impulse_sole_split_leg_closed",
+  "vst_impulse_full_split_position_closed",
+  "vst_impulse_split_stop_upgrade_completed",
+  "vst_impulse_sole_core_stop_raised",
+  "vst_worker_error",
+  "vst_signal_rejected",
+  "vst_margin_top_up_unconfirmed",
+  "vst_stop_protection_degraded",
+  "vst_action_unresolved",
+  "exchange_history_provenance",
+  "source_exit_completed",
+]);
 // The same problem (kind + signal + reason) is posted at most once per window.
 const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 export function isUserFacingVstEvent(row) {
-  if (!row || SILENT_VST_EVENT_KINDS.has(row.kind)) return false;
+  if (!row || SILENT_VST_EVENT_KINDS.has(row.kind) ||
+      !USER_FACING_VST_EVENT_KINDS.has(row.kind)) return false;
   if (row.kind === "vst_action_reconciled") {
     const operation = row.request?.operation ?? row.outcome?.operation;
     return ["close_leg", "raise_stop", "set_runner_break_even"].includes(operation);
