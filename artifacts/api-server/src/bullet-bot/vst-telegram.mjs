@@ -44,6 +44,8 @@ const FAILURE_REASONS = new Map([
     "исполнение входа подтверждено, позиция ОТКРЫТА на бирже, но защитный стоп не подтверждён и НЕ будет выставлен автоматически -- бот больше не трогает эту позицию, нужна ручная проверка на BingX VST"],
   ["entry_abandoned_confirmed_flat_account",
     "по этому символу не найдены открытая позиция и активные заявки; это не означает, что баланс счёта нулевой"],
+  ["entry_unverified_symbol_flat_after_timeout",
+    "исход входа не подтвердился за 10 минут; по символу нет позиции и заявок -- сделки нет, сигнал закрыт без повторной заявки"],
 ]);
 // The three literal reasons above cover "entry"; the same abandon logic
 // (vst-worker.mjs FLAT_ACCOUNT_ABANDON_OPERATIONS / CLOSE_ABANDON_OPERATIONS)
@@ -796,6 +798,13 @@ const SILENT_VST_EVENT_KINDS = new Set([
   "vst_impulse_split_cleanup_verified",
   "vst_impulse_flat_close_cleanup_pending",
   "vst_impulse_flat_stops_cleaned",
+  // Queue/bookkeeping rows: the outcome is reported by its own event
+  // (source_exit_completed, entry verified/rejected, worker error).
+  "source_exit_requested",
+  "vst_failed_entry_recovery_started",
+  "vst_margin_top_up_recovery_prepared",
+  "vst_runner_cancel_pre_transport_refused",
+  "vst_stop_transfer_not_sent",
 ]);
 // The same problem (kind + signal + reason) is posted at most once per window.
 const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;

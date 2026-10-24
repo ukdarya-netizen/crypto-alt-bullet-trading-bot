@@ -1330,6 +1330,50 @@ export function createVstBroker({
     return Array.isArray(rows) && rows.length < MAX_UNPAGINATED_ROWS;
   }
 
+  // Read-only proof that an ambiguous MARKET entry never executed: BingX
+  // answers "order not exist" for its exact client ID, the symbol's order
+  // history has no row with that ID, the symbol has no fill at all since the
+  // intent was created, and the symbol has no position and no open order.
+  // Any read failure or any doubt returns false (the intent stays isolated).
+  const ENTRY_NOT_EXECUTED_MIN_AGE_MS = 10 * 60_000;
+  async function proveEntryNotExecuted({ clientOrderId, request } = {}) {
+    try {
+      if (request?.operation !== "entry" || request?.environment !== "vst" ||
+          request?.accountId !== accountId) return false;
+      const symbol = request.symbol;
+      const name = assertSymbol(symbol);
+      const createdAt = asMillis(request.intentCreatedAt);
+      const now = Number(clock());
+      if (createdAt === null || !Number.isSafeInteger(now) ||
+          now - createdAt < ENTRY_NOT_EXECUTED_MIN_AGE_MS ||
+          now - createdAt > MAX_HISTORY_WINDOW_MS) return false;
+      const exchangeClientId = linkedId(clientOrderId);
+      const range = { startTs: Math.max(1, createdAt - 60_000), endTs: now };
+      const [queried, history, usdtFills, vstFills, positions, orders] =
+        await Promise.all([
+          api.queryOrder(symbol, { clientOrderId: exchangeClientId }),
+          api.queryOrderHistory(symbol, range),
+          api.queryFills(symbol, { ...range, currency: "USDT" }),
+          api.queryFills(symbol, { ...range, currency: "VST" }),
+          api.getPositions(symbol),
+          api.getOpenOrders(symbol),
+        ]);
+      if (queried !== null && queried !== undefined) return false;
+      if (![history, usdtFills, vstFills, positions, orders].every(boundedRows)) {
+        return false;
+      }
+      if (history.some((row) => orderClientId(row) === exchangeClientId)) return false;
+      if ([...usdtFills, ...vstFills].some((fill) =>
+        fill?.symbol === undefined || fill.symbol === name)) return false;
+      if (positions.some((row) => row?.symbol === name &&
+          Number(row.positionAmt ?? row.positionAmount ?? row.quantity) !== 0)) return false;
+      if (orders.some((row) => row?.symbol === name)) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function findHistoryOrder(symbol, exchangeClientId, range) {
     const name = symbolName(symbol);
     const history = await api.queryOrderHistory(symbol, range);
@@ -10611,6 +10655,7 @@ export function createVstBroker({
   }
 
   return Object.freeze({
+    proveEntryNotExecuted,
     stopTransferJournalVersion: typeof api.withStopTransferJournal === "function" ? 1 : 0,
     verifyPreparedStopTransfer,
     verifyProtectedDegradedRaiseStop,

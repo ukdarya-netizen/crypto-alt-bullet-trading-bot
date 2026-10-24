@@ -4764,9 +4764,36 @@ export function createVstWorker({
               intent.outcome?.mutationProvenance,
             )
           : null);
+      const ambiguousEntryAge = Number(clock()) -
+        Number(intent.request?.intentCreatedAt);
+      if (intent.request?.operation === "entry" &&
+          intent.outcome?.definiteRejection !== true &&
+          Number.isFinite(ambiguousEntryAge) &&
+          ambiguousEntryAge >= ENTRY_ABANDON_AFTER_MS &&
+          typeof broker.proveEntryNotExecuted === "function" &&
+          await broker.proveEntryNotExecuted({
+            clientOrderId: intent.clientOrderId, request: intent.request,
+          })) {
+        // Flatness alone cannot retire a possibly sent entry. Only a fresh
+        // read-only proof that the exact client order does not exist, has no
+        // history row and no fill on the symbol since the intent, and the
+        // symbol has no position/orders, retires it -- as an error, never
+        // as a fill and never resubmitted. Left unknown it alerted every
+        // 30 min forever and kept the symbol quarantined.
+        const reason = "entry_unverified_symbol_flat_after_timeout";
+        await store.markIntent(intent.clientOrderId, "failed", {
+          outcome: {
+            reason,
+            ...(priorError ? { submissionError: priorError } : {}),
+            ...(priorErrorMessage ? { submissionErrorMessage: priorErrorMessage } : {}),
+          },
+        });
+        await store.setSignalStatus(intent.sourceSignalId, "error", reason);
+        await store.recordEvent?.(intent.sourceSignalId, "vst_worker_error", { reason });
+        return { kind: "failed" };
+      }
       if (intent.request?.operation === "entry" &&
           intent.outcome?.definiteRejection === true) {
-        // Time and current flatness cannot retire a possibly sent entry.
         // Only the already-classified explicit rejection retains this older
         // terminal-signal path; no expired signal is resubmitted.
         const age = Number(clock()) - Number(intent.request?.intentCreatedAt);

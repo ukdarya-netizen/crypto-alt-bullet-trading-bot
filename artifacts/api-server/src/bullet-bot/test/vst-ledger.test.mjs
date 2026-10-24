@@ -10781,3 +10781,45 @@ test("raise_stop recovery rechecks account-proof age through ledger commit", asy
   );
   assert.equal(tooLong.pool.statements.some(({ sql }) => sql === "BEGIN"), false);
 });
+test("an ambiguous entry is retired as an error only with a read-only proof it never executed", async () => {
+  const store = memoryStore(null);
+  const clientOrderId = "entry-ambiguous-flat-timeout";
+  store.data.intents.push({
+    sourceSignalId: "cab-signal-entry-ambiguous-flat",
+    phase: "market-entry",
+    clientOrderId,
+    request: {
+      operation: "entry",
+      environment: "vst",
+      accountId: "vst-account",
+      symbol: "OFCUSDT",
+      intentCreatedAt: NOW - 11 * 60 * 1000,
+    },
+    state: "unknown",
+  });
+  let submissions = 0;
+  const proofCalls = [];
+  const broker = {
+    ...guardedBroker(store, {
+      currentPosition: null,
+      onPerform: () => { submissions++; },
+    }),
+    proveEntryNotExecuted: async (input) => {
+      proofCalls.push(input);
+      return true;
+    },
+  };
+  const worker = createVstWorker({
+    store, broker, clock: () => NOW,
+    sizingLimits: {
+      environment: "vst", maxQuoteAgeMs: 10_000,
+      maxPriceMoveBps: 500, maxSlippageBps: 100,
+    },
+  });
+  await worker.runOnce();
+  const intent = store.data.intents.find((row) => row.clientOrderId === clientOrderId);
+  assert.equal(proofCalls[0]?.clientOrderId, clientOrderId);
+  assert.equal(intent.state, "failed");
+  assert.equal(submissions, 0, "never resubmitted");
+  assert.equal(store.data.positions.length, 0, "never invents a fill");
+});

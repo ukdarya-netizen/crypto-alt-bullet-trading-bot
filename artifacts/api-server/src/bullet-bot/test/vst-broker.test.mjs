@@ -7995,3 +7995,45 @@ test("both runner-fill readers defer when the final account pair takes over five
         "cancelOriginal", "close", "closeSplitAll"].includes(name)), false, kind);
   }
 });
+test("entry non-execution proof requires not-found order, no history row, no fills and a flat symbol", async () => {
+  const request = {
+    operation: "entry", environment: "vst", accountId: "test-vst-account",
+    symbol: "ETHUSDT", intentCreatedAt: now - 11 * 60_000,
+  };
+  const clean = apiFixture();
+  assert.equal(await clean.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1", request,
+  }), true);
+  assert.equal(clean.calls.some(([name]) => [
+    "entry", "setVstLongLeverage10", "setVstIsolatedMarginForFlatSymbol",
+  ].includes(name)), false, "read-only");
+
+  const tooRecent = apiFixture();
+  assert.equal(await tooRecent.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1",
+    request: { ...request, intentCreatedAt: now - 60_000 },
+  }), false);
+
+  const withFill = apiFixture({ fills: [{ symbol: "ETH-USDT", orderId: "x", qty: "1" }] });
+  assert.equal(await withFill.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1", request,
+  }), false);
+
+  const withPosition = apiFixture({ positions: [{
+    symbol: "ETH-USDT", positionSide: "LONG", positionAmt: "1",
+    avgPrice: "100", positionId: "p1",
+  }] });
+  assert.equal(await withPosition.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1", request,
+  }), false);
+
+  const found = apiFixture({ queriedOrder: { symbol: "ETH-USDT", orderId: "1" } });
+  assert.equal(await found.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1", request,
+  }), false);
+
+  const wrongAccount = apiFixture();
+  assert.equal(await wrongAccount.broker.proveEntryNotExecuted({
+    clientOrderId: "entry-proof-1", request: { ...request, accountId: "other" },
+  }), false);
+});
