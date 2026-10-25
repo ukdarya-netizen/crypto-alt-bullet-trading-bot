@@ -121,6 +121,7 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
       const expected = stops.find((s) => s.orderId === id(row));
       if (!expected || row.symbol !== nativeSymbol(binding.symbol) || row.type !== "STOP_MARKET" ||
           row.status !== "NEW" || row.side !== "SELL" || row.positionSide !== "LONG" ||
+          row.workingType !== "MARK_PRICE" ||
           id(row, ["positionId", "positionID"]) !== binding.positionId ||
           !equal(row.origQty ?? row.quantity, expected.quantity) ||
           !equal(row.stopPrice, expected.stopPrice) || Number(row.executedQty ?? 0) !== 0)
@@ -131,6 +132,9 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
   }
   async function create(binding, stops, onAttemptStarted) {
     assertVst();
+    const filters = await contract(binding.symbol);
+    if (!equal(binding.takePrice, nativeTakePrice(binding.entryPrice, filters.pricePrecision)))
+      throw new Error("native_take_target_is_not_full_five_percent");
     const verify = async () => {
       const [positions, orders, mode, margin, leverage, entry] = await Promise.all([
         readPositions(binding.symbol), readOrders(binding.symbol), getPositionMode(),
@@ -142,7 +146,8 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
           active.length !== 1 || !equal(active[0].positionAmt, binding.quantity) ||
           !entry || id(entry) !== binding.entryOrderId || entry.status !== "FILLED" ||
           entry.symbol !== nativeSymbol(binding.symbol) || entry.side !== "BUY" ||
-          entry.positionSide !== "LONG" || !equal(entry.avgPrice, binding.entryPrice))
+          entry.positionSide !== "LONG" || !equal(entry.avgPrice, binding.entryPrice) ||
+          !positive(entry.executedQty))
         throw new Error("native_take_entry_or_settings_changed");
       checkStopRows(orders, binding, stops);
     };
@@ -359,6 +364,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     if (await store.hasPendingSourceExitRequest?.(record.sourceSignalId)) return;
     const existing = await store.latestNativeTakeIntent(record.sourceSignalId);
     if (existing && !["failed", "reconciled"].includes(existing.state)) return;
+    if (existing && Number(clock()) - Date.parse(existing.updatedAt) < 5_000) return;
     const revision = existing ? Number(existing.request.revision ?? 0) + 1 : 0;
     const takePrice = await native.plan(state.symbol, state.entryPrice);
     const clientOrderId = `nt_${createHash("sha256").update(JSON.stringify([
