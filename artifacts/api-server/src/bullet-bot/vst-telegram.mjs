@@ -875,6 +875,25 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
               Date.now() - lastPosted < VST_TELEGRAM_REPEAT_WINDOW_MS) {
             suppress = true;
           }
+          // The in-memory window is lost on every restart/publish. Also check
+          // the ledger: an earlier event of this signal with the same outcome
+          // that is already acknowledged means the message was posted (or was
+          // itself a suppressed repeat of a posted one).
+          if (!suppress && row.source_signal_id) {
+            const earlier = await client.query(
+              `SELECT prior.kind, prior.detail, i.request, i.outcome
+               FROM vst_events prior
+               LEFT JOIN vst_order_intents i ON i.client_order_id = prior.client_order_id
+               WHERE prior.source_signal_id = $1 AND prior.id < $2
+                 AND prior.telegram_sent_at IS NOT NULL
+               ORDER BY prior.id DESC LIMIT 200`,
+              [row.source_signal_id, row.id],
+            );
+            const outcome = vstTradeOutcome(row);
+            if ((earlier.rows ?? []).some((prior) => vstTradeOutcome(prior) === outcome)) {
+              suppress = true;
+            }
+          }
           if (suppress) {
             // Kept in the ledger; never posted. Does not use the send pace.
             await client.query(

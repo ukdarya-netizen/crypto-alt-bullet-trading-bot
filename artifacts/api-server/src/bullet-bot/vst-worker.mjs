@@ -1650,6 +1650,25 @@ export function createVstWorker({
   // Tick-start lane: close every latched take through the verified full-exit
   // path. Returns an "acted" result after one exchange action so the tick
   // boundary (one mutation per tick) is preserved.
+  const MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS = 2;
+  let managementRotation = 0;
+  async function freshEntryWaiting() {
+    if (typeof store.getPending !== "function") return false;
+    try {
+      const next = await store.getPending();
+      return Boolean(next) &&
+        isFreshSignalAt(next.body?.signalAt, Number(clock()));
+    } catch { return false; }
+  }
+  async function positionsToManageThisTick(openPositions) {
+    if (openPositions.length <= MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS ||
+        !(await freshEntryWaiting())) return openPositions;
+    const start = managementRotation % openPositions.length;
+    managementRotation = start + MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS;
+    return Array.from({ length: MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS },
+      (_, index) => openPositions[(start + index) % openPositions.length]);
+  }
+
   async function processLatchedFullTakes(recordTiming = null) {
     if (exitStrategy !== FULL_TAKE_5PCT) return null;
     const startedAt = performance.now();
@@ -14413,7 +14432,15 @@ export function createVstWorker({
       let verifiedMarketMarkIssue = null;
       const positionBlockedSymbolsThisTick = new Set();
       let sharedAccountSnapshotOffered = false;
-      for (const record of openPositions) {
+      // Entry latency guard. Every exchange call shares one 1.1s gap, so a
+      // full management sweep over many open positions can take minutes and
+      // let fresh signals expire (10-minute window) before their turn. While
+      // a fresh signal waits, manage only a rotating slice of positions per
+      // tick; every position is still visited within a few ticks. Exchange
+      // stop-losses stay in place, and source exits and latched +5% takes run
+      // before this loop on every tick regardless.
+      const managedThisTick = await positionsToManageThisTick(openPositions);
+      for (const record of managedThisTick) {
         // Source withdrawals may be enqueued while a multi-position pass is
         // reading/observing an earlier position. Re-check at every boundary
         // so the next unrelated position cannot consume the rest of the tick.

@@ -97,6 +97,10 @@ test("WOO lifecycle sends an opening and final result, never margin or reconcili
           if (sql.includes("FROM vst_events e")) return {
             rows: rows.filter(row => !acknowledged.has(row.id)),
           };
+          if (sql.includes("FROM vst_events prior")) return {
+            rows: rows.filter(row => acknowledged.has(row.id) &&
+              row.source_signal_id === params[0] && Number(row.id) < Number(params[1])),
+          };
           if (sql.includes("SET telegram_sent_at")) {
             acknowledged.add(params[0]);
             return { rows: [] };
@@ -151,4 +155,47 @@ test("a touched +5% take that is not closed gets two distinct, once-only notices
   assert.notEqual(vstTradeOutcome(event("vst_full_take_close_delayed")),
     vstTradeOutcome(event("vst_full_take_close_stuck")), "separate repeat keys");
   assert.equal(vstTradeOutcome(event("vst_full_take_touched")), null, "a touch alone is not posted");
+});
+
+test("a restart does not repeat an opening already posted for the same signal", async () => {
+  const rows = [
+    event("vst_entry_margin_top_up_pending"),
+    event("vst_entry_verified"),
+  ].map((row, index) => ({
+    ...row, id: String(index + 1), source_signal_id: "id-signal",
+    body: { symbol: row.symbol }, created_at: new Date(),
+  }));
+  const acknowledged = new Set();
+  const messages = [];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, params) {
+          if (sql.includes("pg_try_advisory_lock")) return { rows: [{ acquired: true }] };
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events prior")) return {
+            rows: rows.filter(row => acknowledged.has(row.id) &&
+              row.source_signal_id === params[0] && Number(row.id) < Number(params[1])),
+          };
+          if (sql.includes("FROM vst_events e")) return {
+            rows: rows.filter(row => !acknowledged.has(row.id)),
+          };
+          if (sql.includes("SET telegram_sent_at")) { acknowledged.add(params[0]); return { rows: [] }; }
+          throw new Error("unexpected SQL");
+        },
+        release() {},
+      };
+    },
+  };
+  const make = () => createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123",
+    fetcher: async (_url, options) => {
+      messages.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await make().tick();
+  await make().tick(); // a fresh notifier = a restart; its memory is empty
+  assert.deepEqual(messages, ["BingX VST · WOOUSDT\nПозиция открыта."]);
+  assert.equal(acknowledged.size, 2);
 });

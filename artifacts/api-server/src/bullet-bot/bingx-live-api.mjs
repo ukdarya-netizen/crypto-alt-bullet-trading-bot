@@ -33,6 +33,7 @@ const TRANSIENT_VST_GET_BACKOFF_MS = 2_000;
 const RATE_LIMIT_COOLDOWN_MS = 5_000;
 const RATE_LIMIT_JITTER_MS = 500;
 const VST_TICKER_PATH = "/openApi/swap/v2/quote/ticker";
+const LAST_PRICE_MIN_GAP_MS = 2_000;
 const VST_BOOK_TICKER_PATH = "/openApi/swap/v2/quote/bookTicker";
 const VST_PRE_SIGN_MAX_PACING_DELAY_MS = 2_000;
 const VST_ORDER_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -2843,13 +2844,21 @@ export function createBingXLiveApi({
   // contract. Used only to observe the fixed +5% take between management
   // ticks; it never authorizes a write by itself. Rows without a fresh
   // exchange timestamp are dropped, never back-filled with the local clock.
+  let lastPriceReadAt = 0;
   async function getVstLastPrices(symbols) {
     if (environment !== "vst") {
       throw new BingXLiveApiError("VST last-price reads are unavailable outside VST");
     }
     const wanted = new Set((Array.isArray(symbols) ? symbols : []).map(symbolName));
     if (wanted.size === 0) return [];
-    await outboundPacer.waitForSlot();
+    // Deliberately NOT on the shared signed-request pacer: this single public
+    // market-data read ran every 2.5s and took ~40% of the 1.1s-gap slots
+    // that entries and position management need. It has its own floor.
+    const sinceLast = Number(clock()) - lastPriceReadAt;
+    if (sinceLast < LAST_PRICE_MIN_GAP_MS) {
+      throw new BingXLiveApiError("VST last-price read throttled", { transportStage: "pre_transport" });
+    }
+    lastPriceReadAt = Number(clock());
     let response;
     try {
       response = await fetchImpl(`${origin}${VST_TICKER_PATH}`,

@@ -464,7 +464,7 @@ export async function startBotWorker() {
       } finally {
         fullTakeWatchBusy = false;
       }
-    }, 2_500);
+    }, 3_000);
     fullTakeWatchTimer.unref?.();
   }
   // Exit decisions are durably recorded from each complete, fresh snapshot
