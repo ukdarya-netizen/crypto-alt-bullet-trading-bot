@@ -2071,7 +2071,7 @@ export function createVstWorker({
       // Replays inherit their original journalled choice. Old requests must
       // retain their exact shape, otherwise idempotency comparisons would fail.
       const bound = existing ? existing.request?.executionStrategy : strategyDefaults;
-      if (bound) request = { ...request, executionStrategy: bound };
+      if (bound) request.executionStrategy = bound;
     }
     const journaled = isStopTransferOperation(request.operation) &&
       broker.stopTransferJournalVersion === STOP_TRANSFER_PROTOCOL &&
