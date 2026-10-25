@@ -62,21 +62,26 @@ test("VST wakes coalesce and a busy wake launches exactly one follow-up after th
 
   assert.equal(stop.wakeVst(), true);
   assert.equal(stop.wakeVst(), true);
+  assert.equal(stop.hasPendingVstWake(), true);
   await Promise.resolve();
+  assert.equal(stop.hasPendingVstWake(), false);
   assert.equal(calls, 1);
 
   // Multiple new durable enqueues during the same tick retain one pending
   // wake rather than creating parallel VST work.
   stop.wakeVst();
   stop.wakeVst();
+  assert.equal(stop.hasPendingVstWake(), true);
   gates[0].resolve();
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(calls, 2);
+  assert.equal(stop.hasPendingVstWake(), false);
   assert.equal(active.max, 1);
   gates[1].resolve();
   await Promise.resolve();
   stop();
+  assert.equal(stop.hasPendingVstWake(), false);
 });
 
 test("a VST wake remains pending through a periodic busy tick and stop makes it inert", async () => {

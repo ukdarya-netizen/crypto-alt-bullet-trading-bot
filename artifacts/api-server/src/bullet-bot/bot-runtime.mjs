@@ -180,7 +180,8 @@ export function botRequestHandler(req, res) {
     vstEnabledAt: runtimeStartedAt,
     onIngress: (event) => {
       process.stdout.write(`Bullet signal ingress: ${JSON.stringify(event)}\n`);
-      if (event.outcome === "received") workerTickScheduler?.wakeVst?.();
+      if (["accepted", "both_received", "partial_dual_write"].includes(event.outcome) &&
+          event.duplicate !== true) workerTickScheduler?.wakeVst?.();
     },
     basePath: "/api/bot",
     ingestAliases: ["/api/trading/signals"],

@@ -212,6 +212,57 @@ function seedRaiseStopEntry(store, {
 }
 
 const NOW = Date.parse("2026-10-02T00:00:00.000Z");
+test("a newly queued priority action interrupts ordinary work after capability reads without reserving a write", async () => {
+  const store = memoryStore(activePolicy());
+  const broker = guardedBroker(store);
+  let urgent = false;
+  const getCapabilities = broker.getCapabilities;
+  broker.getCapabilities = async () => {
+    const result = await getCapabilities();
+    urgent = true;
+    return result;
+  };
+  const worker = createVstWorker({
+    store, broker, clock: () => NOW,
+    shouldYieldToUrgentWork: () => urgent,
+  });
+  assert.deepEqual(await worker.runOnce(), {
+    kind: "waiting", reason: "priority_work_queued",
+  });
+  assert.equal(store.data.intents.length, 0);
+  assert.equal(store.data.positions.length, 0);
+});
+
+test("a cancellation/take queued while planning yields before settings or entry, then resumes with fresh reads", async () => {
+  const store = memoryStore(activePolicy());
+  const broker = guardedBroker(store);
+  let urgent = false;
+  let planningReads = 0;
+  broker.readPlanningInputs = async () => {
+    if (++planningReads === 1) urgent = true;
+    return safePlanningInputs();
+  };
+  const worker = createVstWorker({
+    store, broker, clock: () => NOW,
+    sizingLimits: { environment: "vst", maxQuoteAgeMs: 10_000, maxPriceMoveBps: 500, maxSlippageBps: 100 },
+    shouldYieldToUrgentWork: () => urgent,
+  });
+  assert.deepEqual(await worker.runOnce(), { kind: "waiting", reason: "priority_work_queued" });
+  assert.equal(store.data.intents.length, 0);
+  urgent = false;
+  assert.notEqual((await worker.runOnce()).reason, "priority_work_queued");
+  assert.equal(planningReads, 2);
+});
+
+test("a failed priority hint refuses entry instead of opening without the scheduling check", async () => {
+  const store = memoryStore(activePolicy());
+  const worker = createVstWorker({
+    store, broker: guardedBroker(store), clock: () => NOW,
+    shouldYieldToUrgentWork: () => { throw Error("scheduler unavailable"); },
+  });
+  assert.equal((await worker.runOnce()).reason, "priority_work_queued");
+  assert.equal(store.data.intents.length, 0);
+});
 const EXIT_RULES = {
   priceMoveBasis: "unleveraged_percent_from_actual_entry_fill",
   noFixedTakeProfit: true,
