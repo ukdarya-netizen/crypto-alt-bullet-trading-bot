@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createCoalescedPriceRead } from "./coalesced-price-read.mjs";
 import { createVstEndpointPacer } from "./vst-endpoint-pacer.mjs";
+import { runControlledVstBracketProbe } from "./vst-bracket-probe.mjs";
 import { refreshVstEntrySizing } from "./vst-fresh-entry-sizing.mjs";
 import { OWNER_POSITION_PROFILE, allocationBudget, normalizePositionProfile } from "./vst-position-profile.mjs";
 import {
@@ -7979,6 +7980,18 @@ export function createBingXLiveApi({
   }
 
   return Object.freeze(instrumentVstApi({
+    runControlledVstBracketProbe: (options) => {
+      requireVstBtc("BTCUSDT");
+      return runControlledVstBracketProbe({
+        ...options,
+        api: { contract, getPositions, getOpenOrders, getPositionMode, getMarginType,
+          getLeverage, getVstMarkPrice, setVstLongLeverage10, placeVstBoundedLong,
+          queryOrder, closeLong },
+        closePolicy: VST_AUTOMATED_LONG_POLICY,
+        submitTake: (params, guard) => request("POST", PATH.order, params, { beforeSign: guard }),
+        cancelProtective: (params, guard) => request("DELETE", PATH.order, params, { beforeSign: guard }),
+      });
+    },
     withStopTransferJournal,
     withVstPreparationReads,
     preflight,
