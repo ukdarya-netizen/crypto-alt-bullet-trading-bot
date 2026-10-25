@@ -3320,6 +3320,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
       expectedPositionSnapshot = null,
       expectedPositionUpdatedAt = null,
       retireNativeTakeSiblings = false,
+      expectedPositionStatus = null,
     }) {
       const signalId = requireString(sourceSignalId, "sourceSignalId");
       const orderId = requireString(clientOrderId, "clientOrderId");
@@ -3549,7 +3550,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           if (!current ||
               current.updatedAt !== expectedPositionUpdatedAt ||
               current.symbol !== expectedPositionSnapshot.symbol ||
-              current.status !== expectedPositionSnapshot.status ||
+              current.status !== (expectedPositionStatus ?? expectedPositionSnapshot.status) ||
               serialize(current.snapshot, "locked VST position") !==
                 expectedPositionJson) {
             throw new Error("VST position changed before verified intent commit");
@@ -3677,6 +3678,16 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
          ORDER BY outcome->'ownerPreRunnerCloseReview'->>'checkedAt' DESC, id DESC`,
       );
       return result.rows.map(intentFromRow);
+    },
+
+    async getNativeTakePosition(sourceSignalId) {
+      const result = await pool.query(
+        `SELECT source_signal_id, symbol, status, snapshot,
+                updated_at::text AS updated_at
+         FROM vst_positions WHERE source_signal_id = $1`,
+        [requireString(sourceSignalId, "sourceSignalId")],
+      );
+      return positionFromRow(result.rows[0]);
     },
 
     async latestNativeTakeIntent(sourceSignalId) {

@@ -52,8 +52,10 @@ export function nativeTakeOpenMatches(row, binding) {
       row.type === "TAKE_PROFIT_MARKET" && row.status === "NEW" &&
       row.side === "SELL" && row.positionSide === "LONG" &&
       id(row, ["positionId", "positionID"]) === binding.positionId &&
-      equal(row.origQty ?? row.quantity, binding.quantity) &&
-      equal(row.stopPrice, binding.takePrice) && Number(row.executedQty ?? 0) === 0;
+      [row.origQty, row.quantity].filter((v) => v != null).every((v) => equal(v, binding.quantity)) &&
+      positive(row.origQty ?? row.quantity) && equal(row.stopPrice, binding.takePrice) &&
+      [row.executedQty, row.filledQty, row.cumExecQty].filter((v) => v != null)
+        .every((v) => equal(v, "0"));
   } catch { return false; }
 }
 export function nativeTakeQueryMatches(row, binding, open) {
@@ -62,13 +64,16 @@ export function nativeTakeQueryMatches(row, binding, open) {
         row.symbol !== nativeSymbol(binding.symbol) || row.status !== "NEW" ||
         row.side !== "SELL" || row.positionSide !== "LONG" ||
         !equal(row.origQty ?? row.quantity, binding.quantity)) return false;
+    if ([row.executedQty, row.filledQty, row.cumExecQty].filter((v) => v != null)
+      .some((v) => !equal(v, "0"))) return false;
     const positions = ["positionId", "positionID"].map((key) => row[key])
       .filter((v) => v !== undefined && v !== null && v !== "");
     if (positions.some((v) => String(v) !== "0" && v !== binding.positionId) ||
         new Set(positions.map(String)).size > 1) return false;
     if (row.type === "TAKE_PROFIT_MARKET") return equal(row.stopPrice, binding.takePrice);
     return row.type === "LIMIT" && equal(row.price, "0") &&
-      (row.stopPrice === "" || row.stopPrice === undefined || row.stopPrice === null) &&
+      (row.stopPrice === "" || row.stopPrice === undefined || row.stopPrice === null ||
+        equal(row.stopPrice, "0")) &&
       row.takeProfit?.type === "TAKE_PROFIT_MARKET" &&
       row.takeProfit.workingType === binding.workingType && row.workingType === binding.workingType &&
       positions.length > 0 && positions.every((v) => String(v) === "0");
@@ -386,10 +391,11 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     } catch (error) { await report(record.sourceSignalId, error); }
   }
   async function reconcile(intent) {
+    blocked.delete(intent.sourceSignalId);
     let binding = { ...intent.request.binding,
       ...(intent.exchangeOrderId ? { orderId: intent.exchangeOrderId } : {}) };
     if (intent.state !== "prepared" || binding.orderId) native.register(binding);
-    const record = await store.getPosition(intent.sourceSignalId);
+    const record = await store.getNativeTakePosition(intent.sourceSignalId);
     const observation = await native.inspect(binding);
     binding = observation.binding;
     if (binding.orderId && binding.orderId !== intent.exchangeOrderId) {
@@ -464,6 +470,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
           positionId: binding.positionId, fill },
         expectedPositionSnapshot: record.snapshot,
         expectedPositionUpdatedAt: record.updatedAt,
+        expectedPositionStatus: record.status,
         retireNativeTakeSiblings: true,
       });
       native.remove(binding);
