@@ -116,8 +116,11 @@ export async function runControlledVstBracketProbe({
   // Recover by exact client ID even after an ambiguous entry acknowledgement.
   const entry = await api.queryOrder(SYMBOL, { clientOrderId: state.entryClientId });
   const entryId = orderId(entry);
+  const clientIds = [entry.clientOrderId, entry.clientOrderID]
+    .filter((value) => value !== undefined && value !== null && value !== "");
   if (entry.symbol !== NATIVE || entry.side !== "BUY" || entry.positionSide !== "LONG" ||
-      entry.clientOrderId !== state.entryClientId || entry.status !== "FILLED" ||
+      !clientIds.length || clientIds.some((value) => value !== state.entryClientId) ||
+      entry.status !== "FILLED" ||
       Number(entry.executedQty) !== Number(state.quantity) ||
       !(Number(entry.avgPrice) > 0 && Number(entry.avgPrice) <= Number(state.maxPrice))) {
     throw Error("probe_entry_not_confirmed_no_replay");
