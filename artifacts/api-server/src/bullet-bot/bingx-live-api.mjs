@@ -7797,7 +7797,11 @@ export function createBingXLiveApi({
     const name = symbolName(symbol);
     const [mode, positions, orders, marginType, filters, quote] = await Promise.all([
       getPositionMode(), getPositions(), getOpenOrders(), getMarginType(symbol),
-      contract(symbol), getVstMarkPrice(symbol),
+      contract(symbol),
+      // The quote is informational only: a margin-mode switch on a flat
+      // symbol does not depend on price. A slow or stale quote used to abort
+      // the whole switch and lose the entry (POLYX, cab-signal-19853).
+      getVstMarkPrice(symbol).catch(() => null),
     ]);
     if (mode !== "HEDGE") {
       throw new BingXLiveApiError(
@@ -7833,66 +7837,79 @@ export function createBingXLiveApi({
         `VST isolated-margin preparation found unsupported margin type for ${name}`,
       );
     }
-    const quoteAge = clock() - Number(quote?.timestamp);
-    if (quote?.symbol !== name || !Number.isFinite(Number(quote?.markPrice)) ||
-        Number(quote.markPrice) <= 0 || !Number.isFinite(quoteAge) ||
-        quoteAge < -2_000 || quoteAge > 10_000 || filters?.symbol !== name) {
+    if (filters?.symbol !== name) {
       throw new BingXLiveApiError(
-        `VST isolated-margin preparation requires a fresh ${name} contract quote`,
+        `VST isolated-margin preparation requires a verified ${name} contract`,
       );
     }
 
     // Target is this worker's margin mode (ISOLATED for the owner).
+    // Switching margin type on a flat symbol is idempotent state, not an
+    // order, so a failed or ambiguous POST is settled by re-reading the
+    // symbol's margin type and, if it is still not the target, retried.
     if (marginType !== PROFILE_MARGIN) {
-      if (submittedVstIsolatedMarginSymbols.has(name)) {
+      let lastError = null;
+      let refused = false;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        // request() wraps beforeSign errors, so the reason travels by closure.
+        let alreadyTarget = false;
+        let safetyRefusal = null;
+        try {
+          await request("POST", PATH.marginType, {
+            symbol: name, marginType: PROFILE_MARGIN,
+          }, {
+            beforeSign: async () => {
+              // Recheck the symbol-specific safety conditions after any
+              // queued pacing or rate-limit delay, right before signing.
+              const [freshMode, freshPositions, freshOrders, freshMarginType] =
+                await Promise.all([
+                  getPositionMode(), getPositions(), getOpenOrders(),
+                  getMarginType(symbol),
+                ]);
+              if (freshMode !== "HEDGE") {
+                safetyRefusal = "VST isolated-margin preparation requires HEDGE position mode";
+              } else if (!Array.isArray(freshPositions) ||
+                  freshPositions.some((position) => position &&
+                    typeof position === "object" && position.symbol === name &&
+                    validPositionAmount(position) !== 0)) {
+                safetyRefusal = `VST isolated-margin preparation requires ${name} to be flat`;
+              } else if (!Array.isArray(freshOrders) ||
+                  freshOrders.some((order) => order?.symbol === name)) {
+                safetyRefusal = `VST isolated-margin preparation requires no open orders for ${name}`;
+              }
+              if (safetyRefusal) throw new BingXLiveApiError(safetyRefusal);
+              if (freshMarginType === PROFILE_MARGIN) {
+                alreadyTarget = true;
+                throw new BingXLiveApiError("VST margin already at target");
+              }
+              submittedVstIsolatedMarginSymbols.add(name);
+            },
+          });
+          lastError = null;
+          break;
+        } catch (error) {
+          if (alreadyTarget) { lastError = null; break; }
+          // Safety refusals (position/orders/mode) are final, never retried.
+          if (safetyRefusal) { lastError = error; refused = true; break; }
+          lastError = error;
+          let now = null;
+          try { now = await getMarginType(symbol); } catch { /* re-read below */ }
+          if (now === PROFILE_MARGIN) { lastError = null; break; }
+          submittedVstIsolatedMarginSymbols.delete(name);
+          if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 1_500 * attempt));
+        }
+      }
+      if (lastError && refused) throw lastError;
+      if (lastError) {
+        const message = [
+          lastError instanceof Error ? lastError.message : String(lastError),
+          lastError?.code !== undefined ? `code ${lastError.code}` : "",
+          typeof lastError?.exchangeMessage === "string" ? lastError.exchangeMessage : "",
+        ].filter(Boolean).join(" · ");
         throw new BingXLiveApiError(
-          `VST isolated-margin POST for ${name} was already submitted; reconcile read-only`,
+          `VST isolated-margin switch for ${name} failed after retries: ${message}`.slice(0, 300),
         );
       }
-      await request("POST", PATH.marginType, {
-        symbol: name, marginType: PROFILE_MARGIN,
-      }, {
-        beforeSign: async () => {
-          if (submittedVstIsolatedMarginSymbols.has(name)) {
-            throw new BingXLiveApiError(
-              `VST isolated-margin POST for ${name} was already submitted; reconcile read-only`,
-            );
-          }
-          // The initial snapshot is only planning evidence. Recheck the
-          // symbol-specific safety conditions after any queued pacing or
-          // rate-limit delay, immediately before reserving/signing this POST.
-          const [freshMode, freshPositions, freshOrders, freshMarginType] =
-            await Promise.all([
-              getPositionMode(), getPositions(), getOpenOrders(),
-              getMarginType(symbol),
-            ]);
-          if (freshMode !== "HEDGE") {
-            throw new BingXLiveApiError(
-              "VST isolated-margin preparation requires HEDGE position mode",
-            );
-          }
-          if (!Array.isArray(freshPositions) ||
-              freshPositions.some((position) => position &&
-                typeof position === "object" && position.symbol === name &&
-                validPositionAmount(position) !== 0)) {
-            throw new BingXLiveApiError(
-              `VST isolated-margin preparation requires ${name} to be flat`,
-            );
-          }
-          if (!Array.isArray(freshOrders) ||
-              freshOrders.some((order) => order?.symbol === name)) {
-            throw new BingXLiveApiError(
-              `VST isolated-margin preparation requires no open orders for ${name}`,
-            );
-          }
-          if (freshMarginType === PROFILE_MARGIN) {
-            throw new BingXLiveApiError(
-              `VST isolated-margin state for ${name} changed before submission`,
-            );
-          }
-          submittedVstIsolatedMarginSymbols.add(name);
-        },
-      });
     }
 
     const [verifiedMode, verifiedMarginType, finalPositions, finalOrders] =
@@ -7918,8 +7935,8 @@ export function createBingXLiveApi({
       positionsFlat: true,
       openOrdersEmpty: true,
       contractVerified: true,
-      markPrice: String(quote.markPrice),
-      quoteTimestamp: quote.timestamp,
+      markPrice: quote?.markPrice !== undefined ? String(quote.markPrice) : null,
+      quoteTimestamp: quote?.timestamp ?? null,
     };
   }
 

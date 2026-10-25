@@ -20,6 +20,11 @@ function confirmedCloseOutcome(event) {
   return "closed";
 }
 
+// Operations that run before any coin is bought. Their terminal failure
+// means the signal was never opened and must reach Telegram.
+const PRE_ENTRY_OPERATIONS = new Set(["entry", "prepare_margin_mode", "set_isolated_leverage"]);
+const PRE_ENTRY_FAILURES = /^(prepare_margin_mode|set_isolated_leverage)_abandoned_confirmed_flat_account$|^isolated_margin_preparation_(failed|rejected)$/;
+
 export function vstTradeOutcome(event) {
   if (!event) return null;
   const detail = event.detail ?? {};
@@ -28,7 +33,11 @@ export function vstTradeOutcome(event) {
   if (event.kind === "vst_worker_error" &&
       detail.reason === "entry_unverified_symbol_flat_after_timeout") return "not_opened";
   if (event.kind === "vst_worker_error" && detail.reason === "vst_order_rejected" &&
-      detail.operation === "entry") return "not_opened";
+      PRE_ENTRY_OPERATIONS.has(detail.operation)) return "not_opened";
+  if (event.kind === "vst_worker_error" && PRE_ENTRY_FAILURES.test(detail.reason ?? "")) {
+    return "not_opened";
+  }
+  if (event.kind === "vst_worker_error" && detail.stage === "before_entry") return "not_opened";
   if (event.kind === "vst_position_management_quarantined") return "unmanaged";
   if (event.kind === "vst_external_close_verified") return "closed_external";
   if (event.kind === "vst_full_take_close_delayed") return "take_delayed";
@@ -103,6 +112,8 @@ const NOT_OPENED_REASONS = [
   [/^preexisting_exchange_position_or_order$/, "по монете уже есть позиция или ордер на бирже"],
   [/^vst_margin_mode_state_not_verified_or_preparable$/, "не удалось подтвердить изолированную маржу"],
   [/^vst_order_rejected$/, "биржа отклонила ордер"],
+  [/^prepare_margin_mode_|^isolated_margin_preparation_/, "не удалось переключить маржу монеты на изолированную"],
+  [/^set_isolated_leverage_/, "не удалось выставить плечо по монете"],
   [/^entry_unverified_symbol_flat_after_timeout$/, "ордер не исполнен, позиции на бирже нет"],
   [/^unsupported_vst_protective_capabilities/, "биржа не подтвердила нужные функции защиты"],
 ];
@@ -134,6 +145,11 @@ export function formatVstTradeOutcome(event) {
   const lines = [`BingX VST · ${symbol}`, OUTCOME_TEXT[outcome]];
   if (outcome === "not_opened") {
     lines.push(`Причина: ${notOpenedReasonText(event?.detail?.reason)}`);
+    const exchangeText = event?.detail?.errorMessage;
+    if (typeof exchangeText === "string" && exchangeText.trim()) {
+      const clean = exchangeText.replace(/[^\p{L}\p{N}_:,.()·\- ]/gu, "").trim().slice(0, 200);
+      if (clean) lines.push(`Ответ: ${clean}`);
+    }
   }
   if (outcome === "take_delayed" || outcome === "take_stuck") {
     const detail = event?.detail ?? {};

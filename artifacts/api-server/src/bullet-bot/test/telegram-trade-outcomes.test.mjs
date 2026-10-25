@@ -50,6 +50,9 @@ test("pending, technical and unknown events cannot masquerade as trade outcomes"
   assert.equal(vstTradeOutcome(event("vst_worker_error", {
     detail: { reason: "entry_abandoned_confirmed_flat_account" },
   })), null, "flat now does not prove entry never filled");
+  assert.equal(vstTradeOutcome(event("vst_worker_error", {
+    detail: { reason: "raise_stop_abandoned_confirmed_flat_account", operation: "raise_stop" },
+  })), null, "a post-entry operation failure is not a missed entry");
   assert.equal(vstTradeOutcome(event("source_exit_completed", {
     detail: { outcome: "cancelled_unentered" },
   })), null, "no confirmed entry is not proof of no execution");
@@ -249,4 +252,29 @@ test("a position verified flat outside the bot is reported once, not also as a b
   assert.equal(vstTradeOutcome(event("source_exit_completed", {
     detail: { outcome: "closed", detail: { closureOrigin: "external_close_verified_flat" } },
   })), null);
+});
+
+test("every pre-entry failure reaches Telegram as not opened, with the exchange answer", () => {
+  for (const [detail, reasonText] of [
+    [{ reason: "prepare_margin_mode_abandoned_confirmed_flat_account", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "isolated_margin_preparation_failed", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "isolated_margin_preparation_rejected", operation: "prepare_margin_mode" },
+      "не удалось переключить маржу монеты на изолированную"],
+    [{ reason: "set_isolated_leverage_abandoned_confirmed_flat_account", operation: "set_isolated_leverage" },
+      "не удалось выставить плечо по монете"],
+    [{ reason: "vst_order_rejected", operation: "prepare_margin_mode" }, "биржа отклонила ордер"],
+    [{ reason: "bingx_vst_planning_failed", stage: "before_entry" }, "bingx_vst_planning_failed"],
+  ]) {
+    const row = event("vst_worker_error", { symbol: "POLYXUSDT", detail });
+    assert.equal(vstTradeOutcome(row), "not_opened", detail.reason);
+    assert.equal(formatVstTradeOutcome(row),
+      `BingX VST · POLYXUSDT\nПозиция не открыта.\nПричина: ${reasonText}`);
+  }
+  const withAnswer = event("vst_worker_error", { symbol: "POLYXUSDT", detail: {
+    reason: "isolated_margin_preparation_failed", operation: "prepare_margin_mode",
+    errorMessage: "code 80012 · service unavailable",
+  } });
+  assert.match(formatVstTradeOutcome(withAnswer), /Ответ: code 80012 · service unavailable$/);
 });

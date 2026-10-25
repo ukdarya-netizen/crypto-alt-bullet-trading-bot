@@ -4394,12 +4394,14 @@ test("fresh CROSSED 75x ETHUSDT impulse reconciles an ambiguous isolated-margin 
   assert.equal((await worker.enqueue(ethSignal)).kind, "new");
   assert.equal(store.data.pending.body, ethSignal);
 
+  // An ambiguous switch is reconciled against the exchange in the same tick:
+  // the margin is already ISOLATED, so the signal proceeds without parking.
   const ambiguousMargin = await worker.runOnce();
-  assert.equal(ambiguousMargin.kind, "unknown", JSON.stringify(ambiguousMargin));
+  assert.equal(ambiguousMargin.kind, "prepared", JSON.stringify(ambiguousMargin));
   const marginIntent = store.data.intents.find((row) =>
     row.request.operation === "prepare_margin_mode");
   assert.ok(marginIntent);
-  assert.equal(marginIntent.state, "unknown");
+  assert.equal(marginIntent.state, "reconciled");
   assert.equal(marginIntent.request.symbol, "ETHUSDT");
   assert.equal(marginIntent.request.targetMarginMode, "ISOLATED");
   assert.equal(await exchange.api.getMarginType("ETHUSDT"), "ISOLATED");
@@ -4409,10 +4411,7 @@ test("fresh CROSSED 75x ETHUSDT impulse reconciles an ambiguous isolated-margin 
   "neither leverage nor entry may occur before ISO mode is durably confirmed");
 
   const restartedMargin = makeFreshSignalWorker(store, exchange, ["BTCUSDT"]);
-  const marginRecovered = await restartedMargin.worker.runOnce();
-  assert.equal(marginRecovered.kind, "prepared", JSON.stringify(marginRecovered));
-  assert.equal(marginRecovered.reason, "isolated_margin_mode_confirmed");
-  assert.equal(marginIntent.state, "reconciled");
+  assert.equal(ambiguousMargin.reason, "isolated_margin_mode_confirmed");
   assert.equal(exchange.writes.filter(([kind]) =>
     kind === "setMarginIsolated").length, 1,
   "restart reconciles the applied margin switch instead of repeating its POST");

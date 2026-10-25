@@ -849,24 +849,23 @@ test("VST isolated margin requires HEDGE and account-wide flatness before a veri
     symbol: "ETH-USDT", dualSidePosition: true, marginType: "CROSSED",
     failMarginTypePostBeforeApply: true,
   });
+  // A failed switch is re-read and retried (margin type is idempotent state,
+  // not an order); after three verified-unapplied attempts it fails loudly.
   await assert.rejects(
-    unknown.api.setVstIsolatedMarginForFlatSymbol("ETHUSDT"), /request failed/,
+    unknown.api.setVstIsolatedMarginForFlatSymbol("ETHUSDT"), /failed after retries/,
   );
   assert.equal(unknown.state.marginType, "CROSSED");
-  await assert.rejects(
-    unknown.api.setVstIsolatedMarginForFlatSymbol("ETHUSDT"), /already submitted/,
-  );
-  assert.equal(unknown.state.marginTypePostCount, 1);
+  assert.equal(unknown.state.marginTypePostCount, 3);
   assert.equal(unknown.calls.filter(({ url, options }) =>
-    url.pathname.endsWith("/marginType") && options.method === "POST").length, 1);
+    url.pathname.endsWith("/marginType") && options.method === "POST").length, 3);
 
   const appliedUnknown = fixture({
     symbol: "ETH-USDT", dualSidePosition: true, marginType: "CROSSED",
     failMarginTypePostAfterApply: true,
   });
-  await assert.rejects(
-    appliedUnknown.api.setVstIsolatedMarginForFlatSymbol("ETHUSDT"), /request failed/,
-  );
+  // The POST errored after applying: the re-read sees ISOLATED and succeeds.
+  const applied = await appliedUnknown.api.setVstIsolatedMarginForFlatSymbol("ETHUSDT");
+  assert.equal(applied.marginType, "ISOLATED");
   assert.equal(await appliedUnknown.api.getMarginType("ETHUSDT"), "ISOLATED");
   assert.equal(appliedUnknown.state.marginTypePostCount, 1);
 

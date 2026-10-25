@@ -5374,7 +5374,11 @@ export function createVstWorker({
               await flagMarginTopUpUnconfirmed(intent, reason, wasUnknown);
             } else {
               await store.setSignalStatus(intent.sourceSignalId, "error", reason);
-              await store.recordEvent?.(intent.sourceSignalId, "vst_worker_error", { reason });
+              await store.recordEvent?.(intent.sourceSignalId, "vst_worker_error", {
+                reason, operation,
+                ...(priorErrorMessage
+                  ? { errorMessage: String(priorErrorMessage).slice(0, 300) } : {}),
+              });
             }
             return { kind: "failed" };
           }
@@ -7196,7 +7200,7 @@ export function createVstWorker({
         const preparation = await reserveAndPerform(
           signal.sourceSignalId, "isolated-margin-mode", request,
         );
-        if (preparation.kind !== "submitted") {
+        if (preparation.kind !== "submitted" && preparation.kind !== "unknown") {
           const reason = "isolated_margin_preparation_requires_reconciliation";
           await store.setSignalStatus(signal.sourceSignalId, "unknown", reason);
           return { kind: "unknown", reason };
@@ -7211,6 +7215,37 @@ export function createVstWorker({
         } catch {
           evidence = { verified: false, status: "unknown" };
         }
+        // The switch call failed, but the exchange is read immediately
+        // instead of parking the signal for the 10-minute abandon window:
+        // already at target -> continue to entry; still at the other mode on
+        // a readable account -> nothing changed, fail now with the real error
+        // so the owner gets "not opened" in Telegram.
+        if (preparation.kind === "unknown" &&
+            !hasConfirmedIsolatedMarginPreparation(evidence, PROFILE)) {
+          const readMode = validObject(evidence) ? evidence.marginMode : undefined;
+          if (["ISOLATED", "CROSSED"].includes(readMode) && readMode !== PROFILE_MARGIN) {
+            let errorMessage = null;
+            try {
+              const intent = await store.getIntent(
+                signal.sourceSignalId, "isolated-margin-mode",
+              );
+              errorMessage = intent?.outcome?.errorMessage ?? null;
+            } catch { /* message is best-effort */ }
+            const reason = "isolated_margin_preparation_failed";
+            await store.markIntent(preparation.clientOrderId, "failed", {
+              outcome: { reason, marginMode: readMode, errorMessage },
+            });
+            await store.setSignalStatus(signal.sourceSignalId, "error", reason);
+            await store.recordEvent?.(signal.sourceSignalId, "vst_worker_error", {
+              reason, operation: "prepare_margin_mode", marginMode: readMode,
+              ...(errorMessage ? { errorMessage: String(errorMessage).slice(0, 300) } : {}),
+            });
+            return { kind: "error", reason };
+          }
+          const reason = "isolated_margin_preparation_requires_reconciliation";
+          await store.setSignalStatus(signal.sourceSignalId, "unknown", reason);
+          return { kind: "unknown", reason };
+        }
         if (!hasConfirmedIsolatedMarginPreparation(evidence, PROFILE)) {
           if (validObject(evidence) && evidence.verified === true &&
               evidence.status === "rejected") {
@@ -7221,6 +7256,9 @@ export function createVstWorker({
             await store.setSignalStatus(
               signal.sourceSignalId, "error", "isolated_margin_preparation_rejected",
             );
+            await store.recordEvent?.(signal.sourceSignalId, "vst_worker_error", {
+              reason: "isolated_margin_preparation_rejected", operation: "prepare_margin_mode",
+            });
             return { kind: "error", reason: "isolated_margin_preparation_rejected" };
           }
           const reason = "isolated_margin_preparation_evidence_not_verified";
@@ -7390,8 +7428,16 @@ export function createVstWorker({
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message.slice(0, 500) : "vst_execution_error";
+      // No market-entry intent means nothing was ever bought: Telegram must
+      // say "not opened" instead of staying silent.
+      let entryReserved = true;
+      try {
+        entryReserved = Boolean(await store.getIntent(signal.sourceSignalId, "market-entry"));
+      } catch { /* unknown -> stay silent rather than claim not opened */ }
       await store.setSignalStatus(signal.sourceSignalId, "error", reason);
-      await store.recordEvent?.(signal.sourceSignalId, "vst_worker_error", { reason });
+      await store.recordEvent?.(signal.sourceSignalId, "vst_worker_error", {
+        reason, ...(entryReserved ? {} : { stage: "before_entry" }),
+      });
       return { kind: "error", reason };
     }
   }
