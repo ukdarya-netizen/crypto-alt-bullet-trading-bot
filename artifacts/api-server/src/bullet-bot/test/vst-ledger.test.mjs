@@ -8994,6 +8994,35 @@ function validTriggeredStopEvidence() {
   };
 }
 
+test("flat-account recovery proves a Neon stop before declaring an unattributed closure", async () => {
+  const fixture = triggeredStopFixture({
+    patternId: "neon_support_bounce",
+    observeTriggeredStop: async () => validTriggeredStopEvidence(),
+  });
+  let unattributedCloses = 0;
+  fixture.store.closeVerifiedFlatPosition = async () => {
+    unattributedCloses += 1;
+    throw new Error("a proven stop must not become an unattributed close");
+  };
+  fixture.broker.readPosition = async () => {
+    throw new Error("flat position endpoint unavailable; exact stop proof still works");
+  };
+  await fixture.store.upsertPosition({ ...fixture.priorSnapshot, status: "unknown" });
+  const worker = createVstWorker({
+    store: fixture.store, broker: fixture.broker,
+    clock: () => NOW + 60_000, sizingLimits: { environment: "vst" },
+  });
+  const result = await worker.tick();
+  assert.equal(result.operation, "observe_triggered_stop");
+  assert.equal(unattributedCloses, 0);
+  assert.equal(fixture.store.data.positions[0].status, "closed");
+  assert.equal(fixture.store.data.positions[0].snapshot.lastCloseFill.price, 89.5);
+  assert.equal(fixture.store.data.events[0][1], "vst_triggered_stop_verified");
+  await worker.tick();
+  assert.equal(fixture.store.data.events.filter((row) =>
+    row[1] === "vst_triggered_stop_verified").length, 1, "no duplicate close notification");
+});
+
 for (const patternId of ["balanced_grind", "neon_support_bounce", "stealth_accumulation", "future_pattern"]) {
 test(`natural ${patternId} protective stop close is committed from verified child fill evidence`, async () => {
   let observed;
