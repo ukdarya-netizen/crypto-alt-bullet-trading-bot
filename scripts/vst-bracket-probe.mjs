@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBingXLiveApi } from "../artifacts/api-server/src/bullet-bot/bingx-live-api.mjs";
@@ -9,6 +9,12 @@ import { createVstEndpointPacer } from "../artifacts/api-server/src/bullet-bot/v
 export async function main() {
   if (!process.argv.includes("--owner-approved")) throw Error("explicit_owner_approval_required");
   const path = resolve(".local/vst-bracket-probe/state.json");
+  await mkdir(dirname(path), { recursive: true });
+  const lockPath = `${path}.lock`;
+  const lock = await open(lockPath, "wx", 0o600);
+  await lock.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+  await lock.close();
+  try {
   let state = null;
   try { state = JSON.parse(await readFile(path, "utf8")); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -47,6 +53,9 @@ export async function main() {
     state, save, makeId: () => `vbp_${randomBytes(10).toString("hex")}`,
   });
   console.log(JSON.stringify({ event: "probe_result", ...result, writes: starts }, null, 2));
+  } finally {
+    await unlink(lockPath);
+  }
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main().catch((error) => { console.error(error.message); process.exitCode = 1; });
