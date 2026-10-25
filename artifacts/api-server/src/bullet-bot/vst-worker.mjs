@@ -1703,7 +1703,8 @@ export function createVstWorker({
     const now = Number(clock());
     for (const record of openPositions) {
       const state = record?.snapshot;
-      if (nativeTakeProfit?.blocksPosition(record?.sourceSignalId)) continue;
+      if (nativeTakeProfit?.blocksPosition(record?.sourceSignalId) ||
+          nativeTakeProfit?.ownsPosition(record?.sourceSignalId)) continue;
       if (!["open", "closing", "unknown"].includes(record?.status) ||
           state?.environment !== "vst" || state?.accountId !== accountState.accountId ||
           !isCanonicalVstSymbol(record.symbol)) continue;
@@ -11551,6 +11552,11 @@ export function createVstWorker({
       }
       throw error;
     }
+    // A native take may fill after the coordinator's account read. Defer flat
+    // attribution to its exact order/fill journal instead of calling it manual.
+    if (nativeTakeProfit?.ownsPosition(record.sourceSignalId) &&
+        !(Number(exchangePosition?.quantity) > 0))
+      return { kind: "waiting", reason: "native_take_flat_attribution_pending" };
     const exchangeStops = { ...(exchangePosition?.protectiveStops ?? {}) };
     const reusedAccountSnapshotIsCurrent = reusedAccountSnapshotAt !== null &&
       Number(performance.now()) - reusedAccountSnapshotAt <=

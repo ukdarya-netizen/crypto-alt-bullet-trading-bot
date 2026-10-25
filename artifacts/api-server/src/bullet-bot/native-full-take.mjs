@@ -375,6 +375,7 @@ export function nativeStopBindings(state) {
 export function createNativeTakeManager({ api, store, proveFill, clock = Date.now }) {
   const native = api.nativeFullTake;
   const blocked = new Set();
+  const owned = new Set();
   const reported = new Map();
   async function report(sourceSignalId, error) {
     const reason = error instanceof Error ? error.message : "native_take_unverified";
@@ -409,8 +410,11 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         operation: "native_full_take", environment: "vst", accountId: state.accountId, binding, revision,
       } });
     if (reservation.kind !== "new") return;
+    owned.add(record.sourceSignalId);
     try {
       const submitted = await native.create(binding, nativeStopBindings(state), async () => {
+        if (await store.hasPendingSourceExitRequest?.(record.sourceSignalId))
+          throw new Error("native_take_source_exit_queued_before_transport");
         await store.markIntent(clientOrderId, "submitted", { outcome: { attempted: true } });
         native.register(binding);
       });
@@ -443,6 +447,8 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     if (observation.positions.length) {
       if (intent.state === "prepared" && !observation.queried && record?.status === "open") {
         const submitted = await native.create(binding, nativeStopBindings(record.snapshot), async () => {
+          if (await store.hasPendingSourceExitRequest?.(intent.sourceSignalId))
+            throw new Error("native_take_source_exit_queued_before_transport");
           await store.markIntent(intent.clientOrderId, "submitted", { outcome: { attempted: true } });
           native.register(binding);
         });
@@ -452,17 +458,17 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         return;
       }
       if (terminal(observation.queried)) {
-        native.remove(binding);
         await store.markIntent(intent.clientOrderId, "failed", {
           exchangeOrderId: binding.orderId ?? null, outcome: { reason: "native_take_cancelled_on_exchange" },
         });
+        native.remove(binding);
       } else if (observation.active && !equal(observation.positions[0].positionAmt, binding.quantity)) {
         const cancelled = await native.cancelWhenFlat(binding, null, true);
         if (terminal(cancelled)) {
-          native.remove(binding);
           await store.markIntent(intent.clientOrderId, "failed", {
             exchangeOrderId: binding.orderId, outcome: { reason: "native_take_resize_after_verified_quantity_change" },
           });
+          native.remove(binding);
         }
       } else if (!observation.active) await report(intent.sourceSignalId,
         new Error("native_take_order_not_confirmed_no_resubmission"));
@@ -524,16 +530,19 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
       blocked.add(intent.sourceSignalId);
       return;
     }
-    native.remove(binding);
     await store.markIntent(intent.clientOrderId, "failed", {
       exchangeOrderId: binding.orderId, outcome: { reason: "position_flat_native_take_not_filled" },
     });
+    native.remove(binding);
   }
   return Object.freeze({
     ensure,
     blocksPosition: (sourceSignalId) => blocked.has(sourceSignalId),
+    ownsPosition: (sourceSignalId) => owned.has(sourceSignalId),
     async sweep() {
       const intents = await store.listNativeTakeIntents();
+      owned.clear();
+      for (const intent of intents) owned.add(intent.sourceSignalId);
       native.restore(intents);
       // A fresh account cohort covers all resting takes. Initial proof,
       // missing orders and closures still require exact-ID/native-fill reads.
@@ -542,6 +551,8 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         try { await reconcile(intent, snapshot); }
         catch (error) { blocked.add(intent.sourceSignalId); await report(intent.sourceSignalId, error); }
       }
+      owned.clear();
+      for (const intent of await store.listNativeTakeIntents()) owned.add(intent.sourceSignalId);
       for (const record of await store.listOpenPositions()) {
         try { await ensure(record); }
         catch (error) { await report(record.sourceSignalId, error); }

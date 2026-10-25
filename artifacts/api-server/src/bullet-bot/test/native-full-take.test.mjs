@@ -21,10 +21,11 @@ function fixture() {
   const state = { positions: [{ symbol: "BTC-USDT", positionSide: "LONG", positionId: "201",
     positionAmt: "2" }], orders: [stop()], mode: "HEDGE", margin: "ISOLATED", leverage: 10,
     posts: 0, deletes: 0, attempted: false, cancelled: new Set(),
+    positionReads: 0, orderReads: 0,
     failTransport: false, loseAck: false };
   const raw = {
-    getPositions: async () => structuredClone(state.positions),
-    getOpenOrders: async () => structuredClone(state.orders),
+    getPositions: async () => { state.positionReads++; return structuredClone(state.positions); },
+    getOpenOrders: async () => { state.orderReads++; return structuredClone(state.orders); },
     queryOrder: async (_s, key) => {
       if (key.orderId === "101") return { orderId: "101", symbol: "BTC-USDT",
         side: "BUY", positionSide: "LONG", status: "FILLED", avgPrice: "100", executedQty: "2" };
@@ -166,6 +167,18 @@ test("durable native manager creates immediately and never repeats a submitted P
   assert.equal(f.events.filter((e) => e.kind === "vst_native_take_verified").length, 1);
 });
 
+test("a resting take uses a single fresh account cohort, without per-position re-query loops", async () => {
+  const f = fixture();
+  const manager = createNativeTakeManager({ api: f.api, store: f.store,
+    proveFill: async () => ({ verified: false }), clock: () => now });
+  await manager.ensure(f.record);
+  f.state.positionReads = 0; f.state.orderReads = 0;
+  await manager.sweep();
+  assert.equal(f.state.positionReads, 1);
+  assert.equal(f.state.orderReads, 1);
+  assert.equal(manager.ownsPosition("source-1"), true, "reserve flat attribution for the owned take");
+});
+
 test("ambiguous transport is never retried even when exact client lookup has no result", async () => {
   const f = fixture(); f.state.failTransport = true;
   const manager = () => createNativeTakeManager({ api: f.api, store: f.store,
@@ -187,6 +200,7 @@ test("fresh flat observation cancels only known TAKE; leaves stop attribution to
   assert.equal(f.state.deletes, 1);
   assert.equal(f.state.orders[0].orderId, "301", "do not cancel SL before proving the exit");
   assert.equal(f.commits.length, 0, "flat does not prove a profit take");
+  assert.equal(manager.ownsPosition("source-1"), false, "SL proof can proceed once the TP is cancelled");
 });
 
 test("cleanup is forbidden while any live position remains", async () => {
