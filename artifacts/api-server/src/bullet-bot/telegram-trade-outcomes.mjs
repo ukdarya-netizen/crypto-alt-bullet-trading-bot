@@ -125,6 +125,15 @@ const SIZING_REASONS = {
   exceeds_leverage_position_cap: "превышен лимит позиции для плеча",
 };
 
+const BLOCKED_BY_TEXT = {
+  capability_read_failed: "BingX не подтвердил состояние счёта (ошибка чтения биржи)",
+  worker_error: "ошибка в цикле бота",
+  account_state_not_verified: "BingX не подтвердил состояние счёта",
+  verified_mutation_capabilities_unavailable: "BingX не подтвердил состояние счёта",
+  source_exit_queue_unavailable: "очередь закрытий недоступна",
+  unresolved_vst_order_intents: "по прошлой сделке не завершена сверка с биржей",
+};
+
 export function notOpenedReasonText(reason) {
   if (typeof reason !== "string" || !reason) return "причина не указана";
   const parts = reason.split(",").map((part) => part.trim()).filter(Boolean);
@@ -145,6 +154,8 @@ export function formatVstTradeOutcome(event) {
   const lines = [`BingX VST · ${symbol}`, OUTCOME_TEXT[outcome]];
   if (outcome === "not_opened") {
     lines.push(`Причина: ${notOpenedReasonText(event?.detail?.reason)}`);
+    const blocked = BLOCKED_BY_TEXT[event?.detail?.blockedBy];
+    if (blocked) lines.push(`Бот не мог начать вход: ${blocked}`);
     const exchangeText = event?.detail?.errorMessage;
     if (typeof exchangeText === "string" && exchangeText.trim()) {
       const clean = exchangeText.replace(/[^\p{L}\p{N}_:,.()·\- ]/gu, "").trim().slice(0, 200);

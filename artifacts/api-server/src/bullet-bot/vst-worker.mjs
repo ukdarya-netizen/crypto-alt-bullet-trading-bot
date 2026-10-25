@@ -14325,6 +14325,7 @@ export function createVstWorker({
     return rows;
   }
 
+  let lastBlockingReason = null;
   async function runOnce() {
     const tickId = `vst-tick-${randomUUID()}`;
     return withVstDiagnosticContext(
@@ -14423,6 +14424,12 @@ export function createVstWorker({
         });
       } catch {}
     }
+    // Remembered for the "not opened" message of a signal that expires while
+    // the worker could not reach it; cleared by any tick that got past it.
+    lastBlockingReason = failure ? "worker_error"
+      : result?.kind === "waiting" || result?.kind === "blocked"
+        ? (diagnosticReason ?? (typeof result?.reason === "string" ? result.reason : null))
+        : result ? null : lastBlockingReason;
     if (failure) throw failure;
     // Another worker owns the leader lock. No tick ran, so do not treat
     // this as recovery or reset any waiting/blocked alert timers.
@@ -14463,6 +14470,7 @@ export function createVstWorker({
         await store.retireExpiredUnstartedSignals({
           nowMs: Number(clock()),
           maxAgeMs: 10 * 60_000,
+          blockedBy: lastBlockingReason,
         });
       }
       // Durable source exits are inspected before capabilities, unrelated

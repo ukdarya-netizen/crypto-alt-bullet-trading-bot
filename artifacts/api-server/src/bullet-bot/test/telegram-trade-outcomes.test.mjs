@@ -278,3 +278,13 @@ test("every pre-entry failure reaches Telegram as not opened, with the exchange 
   } });
   assert.match(formatVstTradeOutcome(withAnswer), /Ответ: code 80012 · service unavailable$/);
 });
+
+test("an expired signal says what kept the bot from entering", () => {
+  const row = event("vst_signal_rejected", { symbol: "TRBUSDT", detail: {
+    reason: "signal_expired_before_entry_reservation", blockedBy: "capability_read_failed",
+  } });
+  assert.equal(formatVstTradeOutcome(row), [
+    "BingX VST · TRBUSDT", "Позиция не открыта.", "Причина: сигнал устарел до входа",
+    "Бот не мог начать вход: BingX не подтвердил состояние счёта (ошибка чтения биржи)",
+  ].join("\n"));
+});

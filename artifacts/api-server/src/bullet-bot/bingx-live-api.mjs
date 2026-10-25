@@ -1368,8 +1368,21 @@ export function createBingXLiveApi({
       endTime: end,
       limit: 500,
     });
-    const history = Array.isArray(data) ? data : data?.orders;
-    if (!Array.isArray(history) || history.length >= 500 || history.some((order) => {
+    const raw = Array.isArray(data) ? data : data?.orders;
+    if (!Array.isArray(raw) || raw.length >= 500) {
+      throw new BingXLiveApiError("BingX returned invalid order history data");
+    }
+    // An order without a client ID was placed by hand (BingX UI/app) or by
+    // another tool: every order of this bot carries its own client ID. Such
+    // rows can never match a bot intent, so they are left out instead of
+    // failing the whole read -- one manual BTC order used to block every
+    // entry via the capability probe (TRB/ENA, 2026-10-25).
+    const noClientId = (order) => [order.clientOrderId, order.clientOrderID]
+      .every((value) => value === undefined || value === null || value === "");
+    const history = raw.filter((order) => !(order && typeof order === "object" &&
+      !Array.isArray(order) && order.symbol === name && order.type !== "STOP_MARKET" &&
+      noClientId(order)));
+    if (history.some((order) => {
       if (!order || typeof order !== "object" || Array.isArray(order) ||
           order.symbol !== name) return true;
       const clientIds = [order.clientOrderId, order.clientOrderID]

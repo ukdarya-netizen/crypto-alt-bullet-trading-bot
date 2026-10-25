@@ -4207,10 +4207,20 @@ test("queryOrderHistory uses signed GET with a strict array and preserves enviro
       .queryOrderHistory("BTCUSDT", { startTs, endTs }),
     [attachedChild],
   );
+  // Orders placed by hand (no client ID) are left out, never fail the read.
+  for (const manual of [
+    { symbol: "BTC-USDT", clientOrderId: "", type: "MARKET" },
+    { symbol: "BTC-USDT" },
+    { symbol: "BTC-USDT", clientOrderId: null, clientOrderID: "", type: "LIMIT" },
+  ]) {
+    assert.deepEqual(
+      await fixture({ orderHistoryResponse: { orders: [manual, item] } }).api
+        .queryOrderHistory("BTCUSDT", { startTs, endTs }),
+      [item],
+    );
+  }
   for (const orderHistoryResponse of [
     { data: [] },
-    [{ symbol: "BTC-USDT", clientOrderId: "", type: "MARKET" }],
-    [{ symbol: "BTC-USDT" }],
     [{ symbol: "ETH-USDT", clientOrderId: "ve_history" }],
     [{ symbol: "BTC-USDT", clientOrderId: "one", clientOrderID: "two" }],
     Array.from({ length: 500 }, (_, index) => ({

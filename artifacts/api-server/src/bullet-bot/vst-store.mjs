@@ -873,7 +873,12 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
     async retireExpiredUnstartedSignals({
       nowMs = Date.now(),
       maxAgeMs = DEFAULT_EXPIRED_SIGNAL_MAX_AGE_MS,
+      // Why the worker could not reach the signal (e.g. capability_read_failed);
+      // carried into the rejection event so the owner sees the real cause.
+      blockedBy = null,
     } = {}) {
+      const blockedDetail = typeof blockedBy === "string" && /^[a-z0-9_]{1,80}$/.test(blockedBy)
+        ? { blockedBy } : {};
       const now = toFiniteNumber(nowMs, "nowMs");
       const requestedMaxAge = requirePositiveNumber(maxAgeMs, "maxAgeMs");
       // Never let a caller shorten the established ten-minute entry window.
@@ -941,7 +946,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           await client.query(
             `INSERT INTO vst_events (source_signal_id, client_order_id, kind, detail)
              VALUES ($1, NULL, 'vst_signal_rejected', $2::jsonb)`,
-            [row.source_signal_id, serialize({ reason }, "VST event detail")],
+            [row.source_signal_id, serialize({ reason, ...blockedDetail }, "VST event detail")],
           );
           retired += 1;
         }
