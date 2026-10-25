@@ -37,9 +37,8 @@ for (const status of ["profit", "stop_loss", "bu_stop", "breakeven", "expired"])
     assert.equal(proof.exitDecisionAt, at);
   });
 }
-test("review, hold, unknown, missing time, wrong ID and stale snapshots never authorize a close", () => {
+test("non-cancellation review, hold, unknown, missing time, wrong ID and stale snapshots never authorize a close", () => {
   for (const row of [
-    source({ sourceAction: "review", sourceStatus: "cancelled", sourceClosedAt: at, sourceExitPrice: 110 }),
     source({ sourceAction: "review", sourceStatus: "reclassified" }),
     source({ sourceAction: "hold" }), source({ sourceAction: "unknown" }),
     source({ sourceAction: "close", sourceStatus: "profit" }),

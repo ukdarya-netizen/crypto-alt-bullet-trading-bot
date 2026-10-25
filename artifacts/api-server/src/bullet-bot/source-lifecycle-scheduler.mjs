@@ -1,3 +1,5 @@
+import { isSourceCancellation } from "./source-exit-evidence.mjs";
+
 const MAX_SOURCE_SNAPSHOT_AGE_MS = 60_000;
 const MAX_FUTURE_SKEW_MS = 30_000;
 const MAX_PROVIDER_BACKOFF_MS = 5 * 60_000;
@@ -29,7 +31,8 @@ function sourceExitProjection(snapshot) {
     allPositions: snapshot.positions,
     positions: new Map([...snapshot.positions].filter(([, source]) =>
       source?.sourceAction !== undefined
-        ? source.sourceAction === "close" : SOURCE_EXIT_STATUSES.has(source?.sourceStatus))),
+        ? source.sourceAction === "close" || isSourceCancellation(source)
+        : SOURCE_EXIT_STATUSES.has(source?.sourceStatus))),
   };
 }
 

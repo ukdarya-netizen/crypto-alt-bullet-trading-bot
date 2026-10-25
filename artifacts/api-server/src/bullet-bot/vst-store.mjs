@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { nextUncertaintyRead, classifyVstUncertainty, protectedDegradedMarker, uncertaintyEvidenceKeys } from "./vst-uncertainty.mjs";
 import Decimal from "decimal.js";
 import { assertHistoricalFillCoverage, verifyHistoricalCloseEvidence, deriveVstExchangeClientOrderId, isVerifiedEntryCloseCandidate, corroborateHistoricalEntryPrice } from "./vst-historical-close-evidence.mjs";
-import { buildSourceExitEvidence } from "./source-exit-evidence.mjs";
+import { buildSourceExitEvidence, isSourceCancellation, sourceExitRequestPredicate } from "./source-exit-evidence.mjs";
 import { createSourceControlStore } from "./source-position-control.mjs";
 import { compareExactDecimals, exactDecimalParts } from "./vst-exact-decimal.mjs";
 import { archiveExactId, validateArchiveWindow } from "./vst-fill-archive.mjs";
@@ -2290,9 +2290,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           `SELECT id, source_signal_id, kind, detail, created_at::text AS created_at
            FROM vst_events WHERE source_signal_id = $1
              AND kind = 'source_exit_requested'
-             AND detail->>'reason' = 'source_closed'
-             AND detail->'evidence'->>'sourceStatus'
-                 IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+             AND ${sourceExitRequestPredicate("detail", "detail->'evidence'")}
              AND detail->>'requestId' = $2 FOR UPDATE`,
           [signalId, expectedSourceExitRequest?.requestId ??
             expectedSourceExitRequest?.id ?? ""],
@@ -2384,7 +2382,8 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
             sourceExitRequest.evidence.symbol !== request.symbol ||
             sourceExitRequest.evidence.reason !== sourceExitRequest.reason ||
             sourceExitRequest.reason === "source_withdrawal" &&
-              sourceExitRequest.evidence.sourceStatus !== "reclassified" ||
+              sourceExitRequest.evidence.sourceStatus !== "reclassified" &&
+              !isSourceCancellation(sourceExitRequest.evidence) ||
             sourceExitRequest.reason === "source_closed" &&
               !["cancelled", "profit", "stop_loss", "bu_stop", "expired"]
                 .includes(sourceExitRequest.evidence.sourceStatus)) {
@@ -6142,9 +6141,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
               `SELECT id, source_signal_id, kind, detail, created_at::text AS created_at
                FROM vst_events
                WHERE source_signal_id = $1 AND kind = 'source_exit_requested'
-                 AND detail->>'reason' = 'source_closed'
-                 AND detail->'evidence'->>'sourceStatus'
-                     IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+                 AND ${sourceExitRequestPredicate("detail", "detail->'evidence'")}
                ORDER BY id
                LIMIT 1`,
               [id],
@@ -6336,9 +6333,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
                 request.created_at::text AS created_at
          FROM vst_events AS request
          WHERE request.kind = 'source_exit_requested'
-           AND request.detail->>'reason' = 'source_closed'
-           AND request.detail->'evidence'->>'sourceStatus'
-               IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+           AND ${sourceExitRequestPredicate("request.detail", "request.detail->'evidence'")}
            AND NOT EXISTS (
              SELECT 1
              FROM vst_events AS completion
@@ -6363,9 +6358,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
            FROM vst_events AS request
            WHERE request.source_signal_id = $1
              AND request.kind = 'source_exit_requested'
-             AND request.detail->>'reason' = 'source_closed'
-             AND request.detail->'evidence'->>'sourceStatus'
-                 IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+             AND ${sourceExitRequestPredicate("request.detail", "request.detail->'evidence'")}
              AND NOT EXISTS (
                SELECT 1
                FROM vst_events AS completion
@@ -6398,9 +6391,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
         `SELECT source_signal_id
          FROM vst_events
          WHERE kind = 'source_exit_requested' AND detail->>'requestId' = $1
-           AND detail->>'reason' = 'source_closed'
-           AND detail->'evidence'->>'sourceStatus'
-               IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+           AND ${sourceExitRequestPredicate("detail", "detail->'evidence'")}
          ORDER BY id
          LIMIT 1`,
         [id],
@@ -6420,9 +6411,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           `SELECT id, source_signal_id, detail
            FROM vst_events
            WHERE kind = 'source_exit_requested' AND detail->>'requestId' = $1
-             AND detail->>'reason' = 'source_closed'
-             AND detail->'evidence'->>'sourceStatus'
-                 IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+             AND ${sourceExitRequestPredicate("detail", "detail->'evidence'")}
            ORDER BY id
            LIMIT 1`,
           [id],

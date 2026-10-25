@@ -13,6 +13,22 @@ const SOURCE_STATUSES = new Set([
   "reclassified",
 ]);
 
+// Owner-approved cancellation is an instruction to exit our matching lifecycle,
+// not proof that either the source or the exchange has already filled a close.
+export function isSourceCancellation(source) {
+  return source?.sourceStatus === "cancelled" && source.sourceAction === "review";
+}
+
+// PAPER stores evidence directly; VST nests it under detail.evidence.
+// Arguments are internal SQL column expressions, never request data.
+export function sourceExitRequestPredicate(detail, evidence = detail) {
+  return `((${detail}->>'reason' = 'source_closed'
+    AND ${evidence}->>'sourceStatus' IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired'))
+    OR (${detail}->>'reason' = 'source_withdrawal'
+      AND ${evidence}->>'sourceStatus' = 'cancelled'
+      AND ${evidence}->>'sourceAction' = 'review'))`;
+}
+
 function timestamp(value) {
   if (value instanceof Date) {
     const parsed = value.getTime();
@@ -93,7 +109,8 @@ export function buildSourceExitEvidence(source, {
     source.symbol !== symbol ||
     !SOURCE_STATUSES.has(source.sourceStatus)
   ) return null;
-  if (source.sourceAction !== undefined &&
+  const cancellation = isSourceCancellation(source);
+  if (!cancellation && source.sourceAction !== undefined &&
       (source.sourceAction !== "close" ||
        !["profit", "stop_loss", "bu_stop", "breakeven", "expired"].includes(source.sourceStatus))) return null;
 
@@ -111,7 +128,7 @@ export function buildSourceExitEvidence(source, {
 
   let reason;
   let decisionAtMs;
-  if (source.sourceStatus === "reclassified") {
+  if (source.sourceStatus === "reclassified" || cancellation) {
     // Reclassification is the explicitly approved withdrawal decision. Even
     // when source closure data is also present, that data remains provenance
     // rather than changing the nature of this decision.
@@ -161,7 +178,7 @@ export function buildSourceExitEvidence(source, {
   return Object.freeze({
     sourceSignalId,
     symbol,
-    ...(source.sourceAction === "close" ? { sourceAction: "close" } : {}),
+    ...(source.sourceAction === "close" || cancellation ? { sourceAction: source.sourceAction } : {}),
     reason,
     sourceStatus: source.sourceStatus,
     sourceUpdatedAt: updated.value,

@@ -4,7 +4,7 @@ import {
   paperFillCosts,
 } from "./paper-fees.mjs";
 import { PAPER_BASE_MARGIN_USDT } from "./paper-margin.mjs";
-import { buildSourceExitEvidence } from "./source-exit-evidence.mjs";
+import { buildSourceExitEvidence, sourceExitRequestPredicate } from "./source-exit-evidence.mjs";
 
 const ADVISORY_LOCK_NAMESPACE = 4_348_994;
 const ADVISORY_LOCK_ID = 1;
@@ -494,7 +494,7 @@ export function createStore(pool) {
               FROM btb_events
               WHERE source_signal_id = $1
                 AND kind = 'paper_source_exit_requested'
-                AND detail->>'reason' = 'source_closed'
+                AND ${sourceExitRequestPredicate("detail")}
               ORDER BY id
               LIMIT 1
               FOR UPDATE
@@ -552,9 +552,7 @@ export function createStore(pool) {
           SELECT request.id, request.source_signal_id, request.detail, request.created_at
           FROM btb_events request
           WHERE request.kind = 'paper_source_exit_requested'
-            AND request.detail->>'reason' = 'source_closed'
-            AND request.detail->>'sourceStatus'
-                IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+            AND ${sourceExitRequestPredicate("request.detail")}
             AND ($1::text IS NULL OR request.source_signal_id = $1)
             AND NOT EXISTS (
               SELECT 1
@@ -584,9 +582,7 @@ export function createStore(pool) {
           FROM btb_events request
           WHERE request.source_signal_id = $1
             AND request.kind = 'paper_source_exit_requested'
-            AND request.detail->>'reason' = 'source_closed'
-            AND request.detail->>'sourceStatus'
-                IN ('profit', 'stop_loss', 'bu_stop', 'breakeven', 'expired')
+            AND ${sourceExitRequestPredicate("request.detail")}
             AND NOT EXISTS (
               SELECT 1
               FROM btb_events applied

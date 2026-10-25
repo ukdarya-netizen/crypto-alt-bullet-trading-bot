@@ -6,6 +6,7 @@ import {
 } from "./stop-transfer-journal.mjs";
 import { readCommittedStopCloseProof, committedHistoricalCloseProof } from "./vst-source-exit-closed-proof.mjs";
 import { validateSourceCommand, directCloseRequest } from "./source-command-contract.mjs";
+import { isSourceCancellation } from "./source-exit-evidence.mjs";
 import { buildVstPositionCheckEvidence } from "./vst-stop-evidence.mjs";
 import { FILL_ARCHIVE_RETENTION_MS } from "./vst-fill-archive.mjs";
 import {
@@ -12830,7 +12831,7 @@ export function createVstWorker({
       Number.isFinite(Number(evidence.sourceExitPrice)) &&
       Number(evidence.sourceExitPrice) > 0;
     const sourceWithdrawalEvidence = evidence?.reason === "source_withdrawal" &&
-      evidence.sourceStatus === "reclassified" &&
+      (evidence.sourceStatus === "reclassified" || isSourceCancellation(evidence)) &&
       typeof evidence.sourceUpdatedAt === "string" &&
       Number.isFinite(updatedAt) &&
       evidence.exitDecisionAt === evidence.sourceUpdatedAt &&
@@ -13594,7 +13595,8 @@ export function createVstWorker({
   async function processSourceExitRequest(
     row, record, capabilities, prerequisiteAttempts = new Set(),
   ) {
-    if (row?.reason === "source_withdrawal" && typeof store.getSourceControl === "function") {
+    if (row?.reason === "source_withdrawal" && !isSourceCancellation(row.evidence) &&
+        typeof store.getSourceControl === "function") {
       return { kind: "blocked", reason: "source_review_no_exit",
         sourceSignalId: row.sourceSignalId, symbol: row.symbol };
     }
