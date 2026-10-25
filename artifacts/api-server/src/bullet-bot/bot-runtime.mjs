@@ -50,7 +50,7 @@ import {
   loadVstBroker,
 } from "./server.mjs";
 import { createSourceCommandInbox } from "./source-command-inbox.mjs";
-import { processSourceCommand } from "./source-command-runtime.mjs";
+import { runSourceCommandOrTick } from "./source-command-runtime.mjs";
 
 const store = createStore(pool);
 const commandInbox = createSourceCommandInbox(pool);
@@ -422,19 +422,13 @@ export async function startBotWorker() {
   // the other; VST still keeps its watchdog and durable advisory lock.
   if (stopping) return;
   workerTickScheduler = createIndependentWorkerTickScheduler({
-    runVst: vstWorker ? () => observeRuntimeTick("vst", async () => {
-      await processSourceCommand(commandInbox, "vst", vstWorker);
-      return vstWorker.tick();
-    }) : null,
+    runVst: vstWorker ? () => observeRuntimeTick("vst", () =>
+      runSourceCommandOrTick(commandInbox, "vst", vstWorker)) : null,
     runPaper: paperWorker
-      ? () => observeRuntimeTick("paper", async () => {
-        await processSourceCommand(commandInbox, "paper", paperWorker);
-        return paperWorker.tick();
-      })
-      : paperMonitor ? () => observeRuntimeTick("paper", async () => {
-        await processSourceCommand(commandInbox, "paper", paperMonitor);
-        return paperMonitor.tick();
-      }) : null,
+      ? () => observeRuntimeTick("paper", () =>
+        runSourceCommandOrTick(commandInbox, "paper", paperWorker))
+      : paperMonitor ? () => observeRuntimeTick("paper", () =>
+        runSourceCommandOrTick(commandInbox, "paper", paperMonitor)) : null,
     vstTickWatchdog,
     onVstError: (error) => {
       recordVstDiagnostic(error, { stage: "bot_runtime" });

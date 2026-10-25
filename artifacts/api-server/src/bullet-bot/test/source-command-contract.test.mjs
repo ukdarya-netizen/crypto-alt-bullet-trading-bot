@@ -45,6 +45,7 @@ test("execution acknowledgement is independent and exceptions stay retryable", a
 
 test("command HTTP endpoints authenticate before reading, persist before 202, and expose no execution claim", async t => {
   const calls = [];
+  const wakes = [];
   const inbox = {
     receive: async (body, modes) => {
       calls.push({ body, modes });
@@ -56,7 +57,11 @@ test("command HTTP endpoints authenticate before reading, persist before 202, an
     list: async () => [calls[0].body],
   };
   const server = createServer({ store: { enqueue: async () => ({ kind: "accepted" }), listOpenPositions: async () => [] },
-    token: "test-not-a-secret", mode: "both", commandInbox: inbox });
+    token: "test-not-a-secret", mode: "both", commandInbox: inbox,
+    onWorkQueued: value => {
+      assert.equal(calls.length, 1, "wake only after durable receipt");
+      wakes.push(value);
+    } });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const url = `http://127.0.0.1:${server.address().port}/api/trading/commands`;
@@ -69,7 +74,9 @@ test("command HTTP endpoints authenticate before reading, persist before 202, an
   const receipt = await first.json();
   assert.equal(receipt.command.deliveries.every(delivery => delivery.status === "pending"), true);
   assert.deepEqual(calls[0].modes, ["paper", "vst"]);
+  assert.deepEqual(wakes, [{ kind: "source_command" }]);
   assert.equal((await fetch(url, { method: "POST", body, headers })).status, 200);
+  assert.equal(wakes.length, 1, "duplicates must not keep interrupting active work");
   assert.equal((await fetch(url, { headers })).status, 200);
   assert.equal((await fetch(`${url}?limit=0`, { headers })).status, 422);
   assert.equal((await fetch(url, { method: "POST", body: "{}", headers })).status, 422);
