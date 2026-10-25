@@ -142,6 +142,28 @@ function sourceSnapshot(h, entries, asOf = h.now) {
   );
 }
 
+test("cancelled review closes PAPER once at a fresh bid without a source fill", async () => {
+  const h = harness();
+  const row = {
+    sourceSignalId: sample.sourceSignalId, symbol: sample.symbol,
+    sourceStatus: "cancelled", sourceAction: "review",
+    sourceUpdatedAt: new Date(h.now - 1_000).toISOString(),
+    sourceClosedAt: null, sourceExitPrice: null, sourceCancelReason: "source cancelled",
+  };
+  const result = await sourceSnapshot(h, [[sample.sourceSignalId, row]]);
+  assert.equal(result[0].kind, "closed");
+  const closed = h.getStored();
+  assert.equal(closed.status, "closed");
+  assert.equal(closed.remainingQty, 0);
+  assert.equal(closed.paperFills.at(-1).quantity, h.position.remainingQty);
+  assert.equal(closed.paperFills.at(-1).fillPrice, 0.0061);
+  assert.equal(closed.sourceWithdrawal.sourceStatus, "cancelled");
+  assert.equal(closed.sourceWithdrawal.sourceExitPrice, null);
+  await sourceSnapshot(h, [[sample.sourceSignalId, row]]);
+  assert.equal(h.quoteCalls(), 1);
+  assert.equal(h.events.filter(event => event.kind === "paper_close_all").length, 1);
+});
+
 test("source terminal closure settles the full PAPER remainder at a fresh BingX bid", async () => {
   const h = harness();
   const result = await sourceSnapshot(h, [[

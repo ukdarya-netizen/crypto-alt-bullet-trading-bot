@@ -47,6 +47,27 @@ test("non-cancellation review, hold, unknown, missing time, wrong ID and stale s
   assert.equal(buildSourceExitEvidence(source({ sourceAction: "close", sourceStatus: "profit", sourceClosedAt: at }),
     { sourceSignalId: "cab-signal-1", symbol: "ETHUSDT", entryAt, asOf: at, observedAt: now + 60_001 }), null);
 });
+test("cancelled review authorizes withdrawal without inventing a source close or fill", () => {
+  const row = source({ sourceAction: "review", sourceStatus: "cancelled" });
+  const proof = evidence(row);
+  assert.equal(proof.reason, "source_withdrawal");
+  assert.equal(proof.sourceAction, "review");
+  assert.equal(proof.sourceStatus, "cancelled");
+  assert.equal(proof.sourceClosedAt, null);
+  assert.equal(proof.sourceExitPrice, null);
+  assert.equal(proof.exitDecisionAt, at);
+  for (const change of [
+    { sourceSignalId: "other" }, { symbol: "BTCUSDT" },
+    { sourceUpdatedAt: null }, { sourceUpdatedAt: "invalid" },
+    { sourceUpdatedAt: "2026-10-05T01:30:00.000Z" },
+    { sourceUpdatedAt: "2026-10-05T04:30:00.000Z" },
+    { sourceAction: "unknown" }, { sourceAction: "hold" },
+  ]) assert.equal(evidence({ ...row, ...change }), null);
+  assert.equal(buildSourceExitEvidence(row, {
+    sourceSignalId: row.sourceSignalId, symbol: row.symbol,
+    entryAt, asOf: at, observedAt: now + 60_001,
+  }), null);
+});
 test("published strict reader rejects the old contract and accepts paginated explicit actions", async () => {
   let calls = 0;
   const read = row => fetchBulletPositions({ token: "fixture-token", requireSourceAction: true,
@@ -65,7 +86,7 @@ test("published strict reader rejects the old contract and accepts paginated exp
   assert.equal(calls, 2);
   assert.equal(snapshot.positions.get("cab-signal-2").sourceAction, "hold");
 });
-test("review can carry a neutral cancelled row without closure fields; inconsistent actions fail", async () => {
+test("reader accepts cancelled review without invented closure fields; inconsistent actions fail", async () => {
   const read = row => fetchBulletPositions({ token: "fixture-token", requireSourceAction: true,
     clock: () => now, fetchImpl: async () => ({ ok: true,
       json: async () => ({ asOf: at, nextAfterId: null, positions: [row] }) }) });
@@ -145,24 +166,28 @@ test("control persistence is ID-scoped, keeps actual source levels and isolates 
   assert.equal(saved.detail.sourceTrailingStopLevel, null);
   assert.ok(commands.includes("COMMIT"));
 });
-test("scheduler sends only explicit close to queues, keeps the full map for controls, and reports counts", async () => {
+test("scheduler sends close and cancelled review to both queues, preserving the full control map", async () => {
   const rows = new Map([
     ["cab-signal-1", source()],
     ["cab-signal-2", source({ sourceSignalId: "cab-signal-2", sourceAction: "review", sourceStatus: "reclassified" })],
     ["cab-signal-3", source({ sourceSignalId: "cab-signal-3", sourceAction: "close", sourceStatus: "profit", sourceClosedAt: at })],
+    ["cab-signal-4", source({ sourceSignalId: "cab-signal-4", sourceAction: "review", sourceStatus: "cancelled" })],
   ]);
   let queued;
+  let paperQueued;
   let metric;
   const scheduler = createSourceLifecycleScheduler({
     fetchSnapshot: async () => ({ asOf: at, positions: rows }),
+    queuePaperExits: async snapshot => { paperQueued = snapshot; return { queued: [], refreshed: [], rejected: [] }; },
     queueVstExits: async snapshot => { queued = snapshot; return { queued: [], refreshed: [], rejected: [] }; },
     now: () => now, onPollEnd: result => { metric = result; },
   });
   await scheduler.pollNow();
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.deepEqual([...queued.positions.keys()], ["cab-signal-3"]);
-  assert.equal(queued.allPositions.size, 3);
-  assert.equal(metric.recordCount, 3);
+  assert.deepEqual([...queued.positions.keys()], ["cab-signal-3", "cab-signal-4"]);
+  assert.deepEqual([...paperQueued.positions.keys()], ["cab-signal-3", "cab-signal-4"]);
+  assert.equal(queued.allPositions.size, 4);
+  assert.equal(metric.recordCount, 4);
   assert.equal(metric.sourceActions.close, 1);
   scheduler.stop();
 });

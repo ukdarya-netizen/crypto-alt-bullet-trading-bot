@@ -139,6 +139,23 @@ function sourceExitStore() {
   };
 }
 
+test("PAPER cancelled-review request persists and deduplicates across polls", async () => {
+  const h = sourceExitStore();
+  const request = {
+    asOf: "2026-10-01T12:00:00.000Z",
+    positions: new Map([[sourceSignalId, { ...evidence, sourceStatus: "cancelled", sourceAction: "review" }]]),
+    observedAt: "2026-10-01T12:00:01.000Z",
+  };
+  const queued = await h.store.queueSourceExitRequests(request);
+  assert.equal(queued.queued.length, 1);
+  assert.equal(queued.queued[0].evidence.sourceAction, "review");
+  assert.equal(queued.queued[0].evidence.sourceExitPrice, null);
+  await h.store.queueSourceExitRequests(request);
+  assert.equal(h.events.filter(event => event.kind === "paper_source_exit_requested").length, 1);
+  assert.equal(await h.store.hasPendingSourceExitRequest(sourceSignalId), true);
+  assert.equal((await h.store.listPendingSourceExitRequests()).length, 1);
+});
+
 test("PAPER source exit requests are durable, idempotent, and finish only after close", async () => {
   const h = sourceExitStore();
   const request = {

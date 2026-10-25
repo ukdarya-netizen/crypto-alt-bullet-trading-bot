@@ -205,6 +205,24 @@ function poll(store, source = sourcePosition(), {
   });
 }
 
+test("VST cancelled-review request persists and deduplicates after store recreation", async () => {
+  const pool = memoryPool({ signalStatus: "open", withPosition: true, snapshot: { entryAt: SIGNAL_AT } });
+  const request = {
+    asOf: AS_OF, observedAt: OBSERVED_AT,
+    positions: new Map([[SIGNAL_ID, sourcePosition({ sourceAction: "review", sourceStatus: "cancelled" })]]),
+  };
+  const store = createVstStore(pool);
+  const queued = await store.queueSourceExitRequests(request);
+  assert.equal(queued.queued.length, 1);
+  assert.equal(queued.queued[0].evidence.sourceAction, "review");
+  assert.equal(queued.queued[0].evidence.sourceExitPrice, null);
+  const restarted = createVstStore(pool);
+  await restarted.queueSourceExitRequests(request);
+  assert.equal(pool.events.filter(event => event.kind === "source_exit_requested").length, 1);
+  assert.equal(await restarted.hasPendingSourceExitRequest(SIGNAL_ID), true);
+  assert.equal((await restarted.listPendingSourceExitRequests()).length, 1);
+});
+
 test("fresh reclassified withdrawal queues even without source close time or exit price", async () => {
   const pool = memoryPool({
     signalStatus: "open",

@@ -638,6 +638,31 @@ test("a retired ambiguous stop cannot veto a fresh strictly verified source exit
     intent.clientOrderId === degradation.originalClientOrderId).exchangeOrderId, null);
 });
 
+test("cancelled review closes VST through native proof and cleanup once, including after restart", async () => {
+  const value = fixture(LEGACY_POSITIONS[1]);
+  const request = value.data.sourceExitRequests[0];
+  Object.assign(request.evidence, { sourceStatus: "cancelled", sourceAction: "review" });
+  value.store.getSourceControl = async () => ({
+    sourceSignalId: request.sourceSignalId, symbol: request.symbol,
+    sourceStatus: "cancelled", sourceAction: "review",
+  });
+  const close = await value.worker.runOnce();
+  assert.equal(close.kind, "acted", JSON.stringify(close));
+  assert.equal(close.operation, "source_exit_close");
+  assert.equal(value.data.writes.filter(write => write.operation === "close_leg").length, 1);
+  const restarted = createVstWorker({
+    store: value.store, broker: value.broker, clock: () => NOW,
+    sourceExitsEnabled: true, sizingLimits: { environment: "vst" },
+  });
+  for (let tick = 0; tick < 5 && request.state === "pending"; tick++) await restarted.runOnce();
+  assert.equal(request.state, "finished");
+  assert.equal(value.data.positions[0].status, "closed");
+  assert.equal(value.context.stopPresent, false);
+  assert.equal(value.data.writes.filter(write => write.operation === "close_leg").length, 1);
+  await restarted.runOnce();
+  assert.equal(value.data.writes.filter(write => write.operation === "close_leg").length, 1);
+});
+
 test("legacy confirmed source withdrawals close only on reconciled entry proof and finish exact stop cleanup", async () => {
   for (const position of LEGACY_POSITIONS) {
     const value = fixture(position);
