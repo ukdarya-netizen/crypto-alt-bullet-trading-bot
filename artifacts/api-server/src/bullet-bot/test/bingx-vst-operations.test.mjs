@@ -12,6 +12,7 @@ import {
 import { sizeVstLongTrade } from "../vst-sizing.mjs";
 import { createVstBroker } from "../vst-broker.mjs";
 import { createVstWorker } from "../vst-worker.mjs";
+import { createVstEndpointPacer } from "../vst-endpoint-pacer.mjs";
 
 const orderPath = "/openApi/swap/v2/trade/order";
 const leveragePath = "/openApi/swap/v2/trade/leverage";
@@ -28,6 +29,74 @@ function freshEntryAttempt(extra = {}) {
     ...extra,
   };
 }
+
+function endpointPacedFixture(options = {}) {
+  const timeState = { now: 1700000000000 };
+  return fixture({
+    ...options,
+    timeState,
+    requestPacer: createVstEndpointPacer({
+      clock: () => timeState.now,
+      sleep: async (ms) => { timeState.now += ms; },
+    }),
+  });
+}
+
+test("endpoint-paced native entry retains the attached exact stop and one-shot transport", async () => {
+  for (const failEntryPost of [false, true]) {
+    const f = endpointPacedFixture({
+      symbol: "DOGE-USDT", dualSidePosition: true,
+      longLeverage: 10, shortLeverage: 3, failEntryPost,
+    });
+    const request = freshEntryAttempt({ onReprice: async () => {} });
+    if (failEntryPost) await assert.rejects(f.api.placeVstAutomatedLong(request), /request failed/);
+    else await f.api.placeVstAutomatedLong(request);
+    await assert.rejects(f.api.placeVstAutomatedLong(request), /already submitted/);
+    const writes = f.calls.filter(({ url, options }) =>
+      url.pathname === orderPath && options.method === "POST");
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].url.searchParams.get("type"), "MARKET");
+    assert.deepEqual(JSON.parse(writes[0].url.searchParams.get("stopLoss")), {
+      type: "STOP_MARKET", stopPrice: 98,
+    });
+  }
+});
+
+test("endpoint-paced margin addition still checks protection before and after its single POST", async () => {
+  const position = {
+    symbol: "BTC-USDT", positionSide: "LONG", positionAmt: "0.1",
+    positionId: "position-margin", isolatedMargin: "10",
+  };
+  const stop = {
+    symbol: "BTC-USDT", orderId: "margin-stop", type: "STOP_MARKET", status: "NEW",
+    side: "SELL", positionSide: "LONG", positionId: "position-margin",
+    mainOrderId: "entry-margin", origQty: "0.1", stopPrice: "90.0",
+    workingType: "MARK_PRICE",
+  };
+  const f = endpointPacedFixture({
+    dualSidePosition: true, longLeverage: 10, shortLeverage: 7,
+    positions: [position], orders: [stop],
+  });
+  const request = {
+    symbol: "BTCUSDT", amount: "2.5", quantity: "0.1",
+    positionId: "position-margin", entryOrderId: "entry-margin", stopLoss: "90.0",
+    clientOperationId: "paced-margin-1",
+  };
+  const result = await f.api.addVstIsolatedLongMargin(request);
+  assert.equal(result.submitted, true);
+  assert.equal(result.verified, false, "a POST acknowledgement is not confirmed funding");
+  assert.equal(result.protectiveStop.orderId, "margin-stop");
+  await assert.rejects(f.api.addVstIsolatedLongMargin(request), /already submitted/);
+  const posts = f.calls.filter(({ url, options }) =>
+    url.pathname.endsWith("/positionMargin") && options.method === "POST");
+  assert.equal(posts.length, 1);
+  assert.ok(f.calls.some(({ url, options, startedAt }) =>
+    url.pathname.endsWith("/openOrders") && options.method === "GET" &&
+    startedAt < posts[0].startedAt));
+  assert.ok(f.calls.some(({ url, options, startedAt }) =>
+    url.pathname.endsWith("/openOrders") && options.method === "GET" &&
+    startedAt > posts[0].startedAt));
+});
 
 test("a VST entry requests priority only after fresh checks and persists sizing before transport", async () => {
   const slots = [];
