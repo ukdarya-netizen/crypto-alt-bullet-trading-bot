@@ -14,6 +14,12 @@ import {
   VST_POLICY_VERSION,
 } from "./vst-policy.mjs";
 import { sizeVstLongTrade } from "./vst-sizing.mjs";
+import { OWNER_POSITION_PROFILE, normalizePositionProfile } from "./vst-position-profile.mjs";
+
+function marginModeIs(value, profile) {
+  const mode = String(value ?? "").toUpperCase();
+  return (mode === "CROSS" ? "CROSSED" : mode) === profile.marginMode;
+}
 import { safeTickErrorSummary } from "./vst-tick-watchdog.mjs";
 import { createVstReadAlertAggregator, createVstReadRecoveryTracker } from "./vst-read-alerts.mjs";
 import { compareExactDecimals, exactDecimalParts } from "./vst-exact-decimal.mjs";
@@ -646,11 +652,11 @@ function isFreshSignalAt(signalAt, now) {
     now - signalTime >= -30_000;
 }
 
-function hasConfirmedIsolatedMarginPreparation(evidence) {
+function hasConfirmedIsolatedMarginPreparation(evidence, profile = OWNER_POSITION_PROFILE) {
   return validObject(evidence) &&
     evidence.verified === true &&
     evidence.status === "filled" &&
-    evidence.marginMode === "ISOLATED";
+    evidence.marginMode === profile.marginMode;
 }
 
 function decimalUnits(value, precision, name) {
@@ -1115,14 +1121,16 @@ const SAFE_RECOVERY_DEFERRED_REASONS = new Set([
 const BLOCKED_ALERT_AFTER_MS = 5 * 60 * 1000;
 const BLOCKED_ALERT_REPEAT_MS = 30 * 60 * 1000;
 
-function checkEntryEvidence(signal, evidence) {
+function checkEntryEvidence(signal, evidence, profile = OWNER_POSITION_PROFILE) {
+  const PROFILE_LEVERAGE = profile.leverage;
+  const profileMarginIs = (value) => marginModeIs(value, profile);
   const fill = evidence?.fill;
   const position = evidence?.position;
   if (!validObject(fill) || !validObject(position) ||
       position.symbol !== signal.symbol ||
       position.side !== "Buy" ||
-      position.marginMode !== "ISOLATED" ||
-      Number(position.leverage) !== 10) {
+      !profileMarginIs(position.marginMode) ||
+      Number(position.leverage) !== PROFILE_LEVERAGE) {
     throw new Error("entry_fill_or_isolated_position_not_verified");
   }
   const fillPrice = positive(fill.price, "verified fill price");
@@ -1224,7 +1232,9 @@ function marginTopUpEvidenceMatches(request, evidence) {
     stop.status === "NEW" && stop.workingType === "MARK_PRICE";
 }
 
-function checkActionEvidence(request, evidence) {
+function checkActionEvidence(request, evidence, profile = OWNER_POSITION_PROFILE) {
+  const PROFILE_LEVERAGE = profile.leverage;
+  const profileMarginIs = (value) => marginModeIs(value, profile);
   if (!isUsableIntentEvidence(evidence) || evidence.status !== "filled") {
     throw new Error("exchange_action_not_confirmed");
   }
@@ -1235,7 +1245,7 @@ function checkActionEvidence(request, evidence) {
   }
   if (request.operation === "raise_stop") {
     if (position.side !== "Buy" || Number(position.quantity) <= 0 ||
-        Number(position.leverage) !== 10 || position.marginMode !== "ISOLATED") {
+        Number(position.leverage) !== PROFILE_LEVERAGE || !profileMarginIs(position.marginMode)) {
       throw new Error("exchange_position_leverage_or_margin_mode_changed");
     }
     const stop = evidence.protectiveStops?.[request.leg];
@@ -1281,8 +1291,8 @@ function checkActionEvidence(request, evidence) {
     // zero-quantity snapshot. For a confirmed full close, flat is the expected
     // result—not a missing LONG position to be rejected as a mismatch.
     if (expected > Math.max(1e-10, Number(request.previousQuantity) * 1e-8) &&
-        (position.side !== "Buy" || Number(position.leverage) !== 10 ||
-         position.marginMode !== "ISOLATED")) {
+        (position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+         !profileMarginIs(position.marginMode))) {
       throw new Error("exchange_position_leverage_or_margin_mode_changed");
     }
     if (expected > Math.max(1e-10, Number(request.previousQuantity) * 1e-8)) {
@@ -1306,7 +1316,7 @@ function checkActionEvidence(request, evidence) {
     }
   } else if (request.operation === "set_runner_break_even") {
     if (position.side !== "Buy" || Number(position.quantity) <= 0 ||
-        Number(position.leverage) !== 10 || position.marginMode !== "ISOLATED") {
+        Number(position.leverage) !== PROFILE_LEVERAGE || !profileMarginIs(position.marginMode)) {
       throw new Error("exchange_position_leverage_or_margin_mode_changed");
     }
     const stop = evidence.protectiveStops?.runner;
@@ -1466,7 +1476,14 @@ export function createVstWorker({
   entryBatchBudgetMs = 10_000,
   onBlocked,
   onTiming,
+  // Leverage, margin mode and per-trade allocation of every position this
+  // worker opens and manages. Owner: isolated 10x, 1% of balance.
+  positionProfile = broker?.positionProfile ?? OWNER_POSITION_PROFILE,
 }) {
+  const PROFILE = normalizePositionProfile(positionProfile);
+  const PROFILE_LEVERAGE = PROFILE.leverage;
+  const PROFILE_MARGIN = PROFILE.marginMode;
+  const profileMarginIs = (value) => marginModeIs(value, PROFILE);
   let directCloseCompletion = null;
   // ---- Fixed +5% take: detection, durable latch, dedicated close lane and
   // escalation. Failure policy:
@@ -3172,8 +3189,8 @@ export function createVstWorker({
       observedPositionId === positionId &&
       exactDecimalEqual(observedQuantity, split.totalQuantity) &&
       freshPosition.side === "Buy" &&
-      Number(freshPosition.leverage) === 10 &&
-      freshPosition.marginMode === "ISOLATED";
+      Number(freshPosition.leverage) === PROFILE_LEVERAGE &&
+      profileMarginIs(freshPosition.marginMode);
     if (!exactPosition) {
       return {
         outcome: "ambiguous",
@@ -3396,8 +3413,8 @@ export function createVstWorker({
       exactExchangeIdentifier(proof.position.positionId) === positionId &&
       exactDecimalEqual(proof.position.quantity, coreQuantity) &&
       proof.position.side === "Buy" &&
-      Number(proof.position.leverage) === 10 &&
-      proof.position.marginMode === "ISOLATED" &&
+      Number(proof.position.leverage) === PROFILE_LEVERAGE &&
+      profileMarginIs(proof.position.marginMode) &&
        originalStop?.verified === true &&
        coreStop?.verified === true &&
        runnerStop?.verified === true &&
@@ -3739,8 +3756,8 @@ export function createVstWorker({
         exchangePosition.positionId !== request.positionId ||
         !exactDecimalEqual(exchangePosition.quantity, split.totalQuantity) ||
         exchangePosition.side !== "Buy" ||
-        Number(exchangePosition.leverage) !== 10 ||
-        exchangePosition.marginMode !== "ISOLATED" ||
+        Number(exchangePosition.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(exchangePosition.marginMode) ||
         !Array.isArray(orders) ||
         orders.length !== 2 ||
         !expectedIds.every((id) => typeof id === "string" && id.trim() !== "") ||
@@ -3996,7 +4013,7 @@ export function createVstWorker({
     if (typeof store.commitVerifiedIntent !== "function") {
       throw new Error("raise_stop_atomic_commit_unavailable");
     }
-    checkActionEvidence(request, evidence);
+    checkActionEvidence(request, evidence, PROFILE);
     const submittedOrderId = exactExchangeIdentifier(intent.exchangeOrderId);
     const position = evidence?.position;
     const stop = evidence?.protectiveStops?.[request.leg] ??
@@ -4530,7 +4547,7 @@ export function createVstWorker({
               request: intent.request, exchangeOrderId: intent.exchangeOrderId,
             });
           }
-          checkActionEvidence(intent.request, evidence);
+          checkActionEvidence(intent.request, evidence, PROFILE);
           await commitVerifiedRaiseStop(intent, intent.request, evidence);
           return { kind: "reconciled", exchangeMutationAttempted: mutationAttempted };
         } catch (error) {
@@ -4739,8 +4756,8 @@ export function createVstWorker({
           positionId: runnerFill.positionId,
           quantity: runnerFill.coreQuantity,
           side: "Buy",
-          leverage: 10,
-          marginMode: "ISOLATED",
+          leverage: PROFILE_LEVERAGE,
+          marginMode: PROFILE_MARGIN,
           protectiveStops: { core: normalizedCore },
         };
         const evidence = {
@@ -4988,8 +5005,8 @@ export function createVstWorker({
             freshPosition.symbol !== currentPosition.symbol ||
             freshPosition.positionId !== currentPosition.exchangePositionId ||
             Number(freshPosition.quantity) !== expectedQuantity ||
-            freshPosition.side !== "Buy" || Number(freshPosition.leverage) !== 10 ||
-            freshPosition.marginMode !== "ISOLATED" ||
+            freshPosition.side !== "Buy" || Number(freshPosition.leverage) !== PROFILE_LEVERAGE ||
+            !profileMarginIs(freshPosition.marginMode) ||
             !Number.isFinite(expectedQuantity) || expectedQuantity <= 0 ||
             !Number.isFinite(expectedStopPrice) || expectedStopPrice <= 0 ||
             expectedOrderIds.some((id) => typeof id !== "string" || id.trim() === "") ||
@@ -5254,8 +5271,8 @@ export function createVstWorker({
                 patternId: signal?.patternId ?? null,
                 environment: "vst",
                 accountId: intent.request.accountId ?? null,
-                marginMode: intent.request.marginMode ?? "ISOLATED",
-                leverage: 10,
+                marginMode: intent.request.marginMode ?? PROFILE_MARGIN,
+                leverage: PROFILE_LEVERAGE,
                 entryClientOrderId: intent.clientOrderId,
                 signalAt: signal?.signalAt ?? null,
                 signalSnapshot: signal ?? null,
@@ -5537,11 +5554,11 @@ export function createVstWorker({
     }
     if (request.operation === "prepare_margin_mode") {
       try {
-        if (request.targetMarginMode !== "ISOLATED" ||
+        if (request.targetMarginMode !== PROFILE_MARGIN ||
             request.expectedPositionMode !== "HEDGE" ||
             request.requiresFlatAccount !== true ||
             request.requiresNoOpenOrders !== true ||
-            !hasConfirmedIsolatedMarginPreparation(evidence)) {
+            !hasConfirmedIsolatedMarginPreparation(evidence, PROFILE)) {
           throw new Error("isolated_margin_preparation_evidence_not_verified");
         }
         const outcome = {
@@ -5549,7 +5566,7 @@ export function createVstWorker({
           verified: true,
           operation: "prepare_margin_mode",
           positionMode: "HEDGE",
-          marginMode: "ISOLATED",
+          marginMode: PROFILE_MARGIN,
           accountFlat: true,
           noOpenOrders: true,
         };
@@ -5807,7 +5824,7 @@ export function createVstWorker({
     if (request.operation === "close_leg" &&
         request.signal?.patternId === "impulse_buy") {
       try {
-        checkActionEvidence(request, evidence);
+        checkActionEvidence(request, evidence, PROFILE);
         const remaining = Number(request.previousQuantity) - Number(request.quantity);
         const retainedLeg = request.leg === "core" ? "runner" : "core";
         const retained = request[`${retainedLeg}Stop`];
@@ -5944,7 +5961,7 @@ export function createVstWorker({
       }
     }
     try {
-      checkActionEvidence(request, evidence);
+      checkActionEvidence(request, evidence, PROFILE);
       if (request.operation === "close_leg" &&
           request.signal?.patternId === "impulse_buy") {
         const remaining = Number(request.previousQuantity) - Number(request.quantity);
@@ -6045,6 +6062,8 @@ export function createVstWorker({
   }
 
   async function prepareMarginTopUpFollowUp(intent, request, evidence, fill, capabilities) {
+    // Cross margin: the whole account backs the position; nothing to top up.
+    if (PROFILE_MARGIN !== "ISOLATED") return null;
     if (typeof store.commitVerifiedIntent !== "function") {
       throw new Error("vst_margin_top_up_requires_atomic_entry_commit");
     }
@@ -6264,7 +6283,7 @@ export function createVstWorker({
       let marginTopUp;
       let priceAudit;
       try {
-        verifiedFill = checkEntryEvidence(signal, evidence);
+        verifiedFill = checkEntryEvidence(signal, evidence, PROFILE);
         priceAudit = entryPriceAudit(signal, request.sizing, verifiedFill);
         marginTopUp = await prepareMarginTopUpFollowUp(
           intent, request, evidence, verifiedFill, capabilities,
@@ -6301,8 +6320,8 @@ export function createVstWorker({
           executionStatus: "impulse_split_core_pending",
           environment: "vst",
           accountId: capabilities.accountId,
-          marginMode: "ISOLATED",
-          leverage: 10,
+          marginMode: PROFILE_MARGIN,
+          leverage: PROFILE_LEVERAGE,
           entryOrderType: request.entryOrderType,
           entryClientOrderId: intent.clientOrderId,
           entryOrderId: evidence.exchangeOrderId,
@@ -6444,7 +6463,7 @@ export function createVstWorker({
     let fill;
     let marginTopUp;
     try {
-      fill = checkEntryEvidence(signal, evidence);
+      fill = checkEntryEvidence(signal, evidence, PROFILE);
       marginTopUp = await prepareMarginTopUpFollowUp(
         intent, request, evidence, fill, capabilities,
       );
@@ -6488,8 +6507,8 @@ export function createVstWorker({
       sizing: request.sizing,
       ...(priceAudit ? { priceAudit } : {}),
       ...(marginTopUp ? { marginTopUp: marginTopUp.marker } : {}),
-      marginMode: "ISOLATED",
-      leverage: 10,
+      marginMode: PROFILE_MARGIN,
+      leverage: PROFILE_LEVERAGE,
       environment: "vst",
       accountId: capabilities.accountId,
       entryOrderType: request.entryOrderType,
@@ -6518,8 +6537,8 @@ export function createVstWorker({
       initialStop: signal.stopLoss,
       quantity: request.sizing.quantity,
       initialMarginVst: request.sizing.initialMarginVst,
-      leverage: 10,
-      marginMode: "ISOLATED",
+      leverage: PROFILE_LEVERAGE,
+      marginMode: PROFILE_MARGIN,
       environment: "vst",
     };
     if (typeof store.commitVerifiedIntent === "function") {
@@ -6977,11 +6996,12 @@ export function createVstWorker({
         throw error;
       }
       const marginPreparationRequired =
-        input?.marginMode === "CROSSED" &&
+        ["ISOLATED", "CROSSED"].includes(input?.marginMode) &&
+        input.marginMode !== PROFILE_MARGIN &&
         input.marginModeVerified === false &&
         input.requiresIsolatedMarginPreparation === true;
       const alreadyIsolatedAndVerified =
-        input?.marginMode === "ISOLATED" &&
+        input?.marginMode === PROFILE_MARGIN &&
         input.marginModeVerified === true &&
         input.requiresIsolatedMarginPreparation === false;
       if (!marginPreparationRequired && !alreadyIsolatedAndVerified) {
@@ -7010,6 +7030,7 @@ export function createVstWorker({
         tickSize: input.risk?.tickSize,
         maxPositionValue: input.risk?.maxPositionValue,
         quantityUnitMultiple: strategyAuthority !== "source" && signal.patternId === "impulse_buy" ? 5 : 1,
+        positionProfile: PROFILE,
       };
       const sizing = sizeVstLongTrade(limits);
       // Keep the source signal immutable in the ledger, but carry the
@@ -7110,7 +7131,7 @@ export function createVstWorker({
           accountId: capabilities.accountId,
           environment: "vst",
           symbol: signal.symbol,
-          targetMarginMode: "ISOLATED",
+          targetMarginMode: PROFILE_MARGIN,
           expectedPositionMode: "HEDGE",
           requiresFlatAccount: true,
           requiresNoOpenOrders: true,
@@ -7134,7 +7155,7 @@ export function createVstWorker({
         } catch {
           evidence = { verified: false, status: "unknown" };
         }
-        if (!hasConfirmedIsolatedMarginPreparation(evidence)) {
+        if (!hasConfirmedIsolatedMarginPreparation(evidence, PROFILE)) {
           if (validObject(evidence) && evidence.verified === true &&
               evidence.status === "rejected") {
             await store.markIntent(preparation.clientOrderId, "failed", {
@@ -7159,7 +7180,7 @@ export function createVstWorker({
           verified: true,
           operation: "prepare_margin_mode",
           positionMode: "HEDGE",
-          marginMode: "ISOLATED",
+          marginMode: PROFILE_MARGIN,
           accountFlat: true,
           noOpenOrders: true,
         };
@@ -7187,8 +7208,8 @@ export function createVstWorker({
         operation: "set_isolated_leverage",
         accountId: capabilities.accountId,
         symbol: signal.symbol,
-        leverage: 10,
-        marginMode: "ISOLATED",
+        leverage: PROFILE_LEVERAGE,
+        marginMode: PROFILE_MARGIN,
         environment: "vst",
       };
       const leverage = await reserveAndPerform(
@@ -7206,8 +7227,8 @@ export function createVstWorker({
       });
       if (leverageEvidence?.verified !== true ||
           leverageEvidence.status !== "filled" ||
-          leverageEvidence.position?.marginMode !== "ISOLATED" ||
-          Number(leverageEvidence.position?.leverage) !== 10) {
+          !profileMarginIs(leverageEvidence.position?.marginMode) ||
+          Number(leverageEvidence.position?.leverage) !== PROFILE_LEVERAGE) {
         await store.markIntent(leverage.clientOrderId, "unknown", {
           outcome: { reason: "isolated_10x_not_confirmed" },
         });
@@ -7217,7 +7238,7 @@ export function createVstWorker({
       if (leverage.kind === "submitted") {
         await store.markIntent(leverage.clientOrderId, "reconciled", {
           exchangeOrderId: leverageEvidence.exchangeOrderId ?? null,
-          outcome: { verified: true, marginMode: "ISOLATED", leverage: 10 },
+          outcome: { verified: true, marginMode: PROFILE_MARGIN, leverage: PROFILE_LEVERAGE },
         });
         await store.setSignalStatus(signal.sourceSignalId, "planning");
         return { kind: "prepared", reason: "isolated_leverage_confirmed" };
@@ -7239,8 +7260,8 @@ export function createVstWorker({
           expectedPrice: signal.referencePrice,
           quantityUnitMultiple: signal.patternId === "impulse_buy" ? 5 : 1,
         },
-        marginMode: "ISOLATED",
-        leverage: 10,
+        marginMode: PROFILE_MARGIN,
+        leverage: PROFILE_LEVERAGE,
         stopLoss: signal.stopLoss,
         sizing,
         ...(Number(sizing.plannedTopUpVst) > 0
@@ -7731,8 +7752,8 @@ export function createVstWorker({
       symbol: state.symbol,
       status: "closed",
       sizing: state.sizing,
-      marginMode: "ISOLATED",
-      leverage: 10,
+      marginMode: PROFILE_MARGIN,
+      leverage: PROFILE_LEVERAGE,
       environment: "vst",
       accountId: state.accountId,
       entryClientOrderId: state.entryClientOrderId,
@@ -9087,8 +9108,8 @@ export function createVstWorker({
         baselineOpenOrderIds: [...split.baselineOpenOrderIds],
         split,
         sizing: state.sizing,
-        marginMode: "ISOLATED",
-        leverage: 10,
+        marginMode: PROFILE_MARGIN,
+        leverage: PROFILE_LEVERAGE,
         environment: "vst",
       };
     } else {
@@ -9100,8 +9121,8 @@ export function createVstWorker({
     position.sourceSignalId = state.sourceSignalId;
     position.symbol = state.symbol;
     position.sizing = state.sizing;
-    position.marginMode = "ISOLATED";
-    position.leverage = 10;
+    position.marginMode = PROFILE_MARGIN;
+    position.leverage = PROFILE_LEVERAGE;
     position.environment = "vst";
     position.accountId = state.accountId;
     position.entryClientOrderId = state.entryClientOrderId;
@@ -9114,8 +9135,8 @@ export function createVstWorker({
         evidence.status !== "filled" || !validObject(position) ||
         position.verified !== true || position.symbol !== request.symbol ||
         position.positionId !== request.positionId ||
-        position.side !== "Buy" || Number(position.leverage) !== 10 ||
-        position.marginMode !== "ISOLATED" ||
+        position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(position.marginMode) ||
         Number(position.quantity) !== Number(request.totalQuantity)) {
       throw new Error("impulse_split_upgrade_position_not_verified");
     }
@@ -9596,7 +9617,7 @@ export function createVstWorker({
         side: { expected: "Buy", actual: exchangePosition?.side,
           matches: exchangePosition?.side === "Buy" },
         leverage: { expected: 10, actual: exchangePosition?.leverage,
-          matches: Number(exchangePosition?.leverage) === 10 },
+          matches: Number(exchangePosition?.leverage) === PROFILE_LEVERAGE },
         positionId: {
           expected: state.split.positionId, actual: exchangePosition?.positionId,
           matches: exchangePosition?.positionId === state.split.positionId,
@@ -9849,8 +9870,8 @@ export function createVstWorker({
     const positionValid = validObject(position) && position.verified === true &&
       position.symbol === state.symbol && position.positionId === state.exchangePositionId &&
       Number(position.quantity) === Number(state.split.totalQuantity) &&
-      position.side === "Buy" && Number(position.leverage) === 10 &&
-      position.marginMode === "ISOLATED";
+      position.side === "Buy" && Number(position.leverage) === PROFILE_LEVERAGE &&
+      profileMarginIs(position.marginMode);
     const rawClientId = rows?.find((row) =>
       (row.orderId ?? row.orderID) === pending.newStop.orderId)?.clientOrderId ??
       rows?.find((row) =>
@@ -9959,8 +9980,8 @@ export function createVstWorker({
         position.symbol !== state.symbol ||
         position.positionId !== state.exchangePositionId ||
         Number(position.quantity) !== Number(cleanup.remainingQuantity) ||
-        position.side !== "Buy" || Number(position.leverage) !== 10 ||
-        position.marginMode !== "ISOLATED" ||
+        position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(position.marginMode) ||
         JSON.stringify(currentIds) !== JSON.stringify(expectedIds) ||
         !exactOrder(cleanup.originalStopOrderId, cleanup.remainingQuantity, state.stopPrice) ||
         !exactOrder(cleanup.coreStopOrderId, cleanup.remainingQuantity, state.stopPrice)) {
@@ -10078,8 +10099,8 @@ export function createVstWorker({
         exchangePosition.symbol !== state.symbol ||
         exchangePosition.positionId !== state.exchangePositionId ||
         Number(exchangePosition.quantity) !== Number(state.split.totalQuantity) ||
-        exchangePosition.side !== "Buy" || Number(exchangePosition.leverage) !== 10 ||
-        exchangePosition.marginMode !== "ISOLATED" ||
+        exchangePosition.side !== "Buy" || Number(exchangePosition.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(exchangePosition.marginMode) ||
         !oldObserved || !otherObserved ||
         JSON.stringify(currentIds) !== JSON.stringify(expectedIds) ||
         !Number.isFinite(Number(action.stopPrice)) ||
@@ -10153,8 +10174,8 @@ export function createVstWorker({
         position.symbol !== state.symbol ||
         position.positionId !== state.exchangePositionId ||
         Number(position.quantity) !== Number(state.coreQty) ||
-        position.side !== "Buy" || Number(position.leverage) !== 10 ||
-        position.marginMode !== "ISOLATED" ||
+        position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(position.marginMode) ||
         Number(action.stopPrice) <= Number(oldStop.stopPrice) ||
         !capabilities?.features?.includes("impulse_runner_stop_and_partial_close") ||
         typeof store.commitVerifiedIntent !== "function") {
@@ -10173,8 +10194,8 @@ export function createVstWorker({
       status: "open",
       split: { ...state.split },
       sizing: state.sizing,
-      marginMode: "ISOLATED",
-      leverage: 10,
+      marginMode: PROFILE_MARGIN,
+      leverage: PROFILE_LEVERAGE,
       environment: "vst",
       accountId: state.accountId,
       entryClientOrderId: state.entryClientOrderId,
@@ -10676,7 +10697,7 @@ export function createVstWorker({
       }
       fill = verifiedFlatCloseFill(evidence, totalQuantity);
     } else {
-      checkActionEvidence(request, evidence);
+      checkActionEvidence(request, evidence, PROFILE);
       if (evidence.status !== "filled" ||
           evidence.position.positionId !== request.positionId ||
           Number(evidence.position.quantity) !== 0) {
@@ -10876,7 +10897,7 @@ export function createVstWorker({
     const split = prior?.split;
     const stop = evidence?.protectiveStops?.core ??
       evidence?.position?.protectiveStops?.core;
-    checkActionEvidence(request, evidence);
+    checkActionEvidence(request, evidence, PROFILE);
     if (!validObject(prior) || prior.patternId !== "impulse_buy" ||
         prior.coreOpen !== true || prior.runnerOpen !== false ||
         split?.stage !== "complete" || request.leg !== "core" ||
@@ -10970,8 +10991,8 @@ export function createVstWorker({
         position.symbol !== state.symbol ||
         position.positionId !== state.exchangePositionId ||
         Number(position.quantity) !== expectedQuantity ||
-        position.side !== "Buy" || Number(position.leverage) !== 10 ||
-        position.marginMode !== "ISOLATED") {
+        position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(position.marginMode)) {
       const reason = "impulse_sole_leg_close_preflight_not_verified";
       await store.setSignalStatus(record.sourceSignalId, "unknown", reason);
       await store.upsertPosition({
@@ -11101,8 +11122,8 @@ export function createVstWorker({
         position.symbol !== state.symbol ||
         position.positionId !== split.positionId ||
         Number(position.quantity) !== totalQuantity ||
-        position.side !== "Buy" || Number(position.leverage) !== 10 ||
-        position.marginMode !== "ISOLATED" ||
+        position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(position.marginMode) ||
         !Number.isSafeInteger(observedAt) ||
         typeof store.commitVerifiedIntent !== "function") {
       const reason = "impulse_runner_abort_original_stop_or_full_position_unverified";
@@ -11538,8 +11559,8 @@ export function createVstWorker({
     if (validObject(verifiedExchangePosition) && verifiedExchangePosition.verified === true &&
         verifiedExchangePosition.symbol === state.symbol &&
         verifiedExchangePosition.side === "Buy" &&
-        Number(verifiedExchangePosition.leverage) === 10 &&
-        verifiedExchangePosition.marginMode === "ISOLATED" &&
+        Number(verifiedExchangePosition.leverage) === PROFILE_LEVERAGE &&
+        profileMarginIs(verifiedExchangePosition.marginMode) &&
         (positionQuantityMismatch || exactCoreStopMissingOrChanged ||
           exactRunnerStopMissingOrChanged)) {
       if (policyRecovery) {
@@ -11557,8 +11578,8 @@ export function createVstWorker({
       !validObject(verifiedExchangePosition) || verifiedExchangePosition.verified !== true ||
       verifiedExchangePosition.side !== "Buy" ||
       verifiedExchangePosition.symbol !== state.symbol ||
-      Number(verifiedExchangePosition.leverage) !== 10 ||
-      verifiedExchangePosition.marginMode !== "ISOLATED" ||
+      Number(verifiedExchangePosition.leverage) !== PROFILE_LEVERAGE ||
+      !profileMarginIs(verifiedExchangePosition.marginMode) ||
       (hasExactStoredCoreStop && verifiedExchangePosition.positionId !== undefined &&
         verifiedExchangePosition.positionId !== state.exchangePositionId) ||
       Math.abs(Number(verifiedExchangePosition.quantity) - Number(state.remainingQty)) >
@@ -11589,9 +11610,9 @@ export function createVstWorker({
             positionVerified: pair(true, verifiedExchangePosition.verified),
             symbol: pair(state.symbol, verifiedExchangePosition.symbol),
             side: pair("Buy", verifiedExchangePosition.side),
-            leverage: pair(10, verifiedExchangePosition.leverage,
-              Number(verifiedExchangePosition.leverage) === 10),
-            marginMode: pair("ISOLATED", verifiedExchangePosition.marginMode),
+            leverage: pair(PROFILE_LEVERAGE, verifiedExchangePosition.leverage,
+              Number(verifiedExchangePosition.leverage) === PROFILE_LEVERAGE),
+            marginMode: pair(PROFILE_MARGIN, verifiedExchangePosition.marginMode),
             ...(hasExactStoredCoreStop && verifiedExchangePosition.positionId !== undefined
               ? { positionId: pair(state.exchangePositionId, verifiedExchangePosition.positionId) } : {}),
             quantity: pair(state.remainingQty, verifiedExchangePosition.quantity,
@@ -11773,8 +11794,8 @@ export function createVstWorker({
         status: result.next.status,
         ...result.next,
         sizing: state.sizing,
-        marginMode: "ISOLATED",
-        leverage: 10,
+        marginMode: PROFILE_MARGIN,
+        leverage: PROFILE_LEVERAGE,
         environment: "vst",
         accountId: state.accountId,
         entryClientOrderId: state.entryClientOrderId,
@@ -11792,8 +11813,8 @@ export function createVstWorker({
         status: result.next.status,
         ...result.next,
         sizing: state.sizing,
-        marginMode: "ISOLATED",
-        leverage: 10,
+        marginMode: PROFILE_MARGIN,
+        leverage: PROFILE_LEVERAGE,
         environment: "vst",
         accountId: state.accountId,
         entryClientOrderId: state.entryClientOrderId,
@@ -11985,8 +12006,8 @@ export function createVstWorker({
       status: nextPolicy.status,
       ...nextPolicy,
       sizing: state.sizing,
-      marginMode: "ISOLATED",
-      leverage: 10,
+      marginMode: PROFILE_MARGIN,
+      leverage: PROFILE_LEVERAGE,
       environment: "vst",
       accountId: state.accountId,
       entryClientOrderId: state.entryClientOrderId,
@@ -12140,7 +12161,7 @@ export function createVstWorker({
       evidence = { verified: false, status: "unknown" };
     }
     try {
-      checkActionEvidence(request, evidence);
+      checkActionEvidence(request, evidence, PROFILE);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "exchange_action_state_not_verified";
       await store.markIntent(submitted.clientOrderId, "unknown", {
@@ -13087,7 +13108,7 @@ export function createVstWorker({
         Number(evidence.position?.quantity) !== 0) {
       throw new Error("source_exit_close_intent_identity_or_fill_invalid");
     }
-    checkActionEvidence(request, evidence);
+    checkActionEvidence(request, evidence, PROFILE);
     const fill = closeFillSnapshot(evidence);
     const accountState = await broker.readAccountState();
     if (!validObject(accountState) || accountState.verified !== true ||
@@ -13455,9 +13476,9 @@ export function createVstWorker({
     const actualQuantity = String(activeRows[0].positionAmt ?? activeRows[0].quantity);
     if (!Number.isFinite(Number(actualQuantity)) || Number(actualQuantity) <= 0 ||
         activeRows[0].leverage !== undefined &&
-          Number(activeRows[0].leverage) !== 10 ||
+          Number(activeRows[0].leverage) !== PROFILE_LEVERAGE ||
         activeRows[0].marginMode !== undefined &&
-          activeRows[0].marginMode !== "ISOLATED") {
+          !profileMarginIs(activeRows[0].marginMode)) {
       throw new Error("source_exit_exchange_position_read_not_verified");
     }
     const ownedStops = sourceExitKnownStops(state, state.exchangePositionId);
@@ -13546,8 +13567,8 @@ export function createVstWorker({
     if (!validObject(exchangePosition) || exchangePosition.verified !== true ||
         exchangePosition.symbol !== state.symbol ||
         exchangePosition.side !== "Buy" ||
-        Number(exchangePosition.leverage) !== 10 ||
-        exchangePosition.marginMode !== "ISOLATED" ||
+        Number(exchangePosition.leverage) !== PROFILE_LEVERAGE ||
+        !profileMarginIs(exchangePosition.marginMode) ||
         Math.abs(Number(exchangePosition.quantity) - actualQuantity) >
           Math.max(1e-10, expectedQuantity * 1e-8) ||
         symbolRows.length === 1 &&
@@ -15036,12 +15057,12 @@ export function createVstWorker({
               store.getIntent(candidate.sourceSignalId, "isolated-leverage-10"),
             ]);
             const confirmedMargin = marginIntent?.state === "reconciled" &&
-              hasConfirmedIsolatedMarginPreparation(marginIntent.outcome);
+              hasConfirmedIsolatedMarginPreparation(marginIntent.outcome, PROFILE);
             const confirmedLeverage = leverageIntent?.state === "reconciled" &&
               leverageIntent.request?.operation === "set_isolated_leverage" &&
               leverageIntent.outcome?.verified === true &&
-              leverageIntent.outcome?.marginMode === "ISOLATED" &&
-              Number(leverageIntent.outcome?.leverage) === 10;
+              profileMarginIs(leverageIntent.outcome?.marginMode) &&
+              Number(leverageIntent.outcome?.leverage) === PROFILE_LEVERAGE;
             if (entryIntent || !(confirmedMargin || confirmedLeverage)) {
               if (!pendingBatch.length) pending = candidate;
               else pendingBatchBoundary = true;
@@ -15433,7 +15454,7 @@ export function createVstWorker({
       evidence = { verified: false, status: "unknown" };
     }
     try {
-      checkActionEvidence(request, evidence);
+      checkActionEvidence(request, evidence, PROFILE);
     } catch (error) {
       const reason = error instanceof Error ? error.message : "exchange_action_state_not_verified";
       await store.markIntent(clientOrderId, "unknown", {

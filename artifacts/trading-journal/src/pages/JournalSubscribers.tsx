@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Pause, Play, ShieldOff, X } from "lucide-react";
 import { formatUsdt, toneClass } from "@/lib/performance";
-import { api, ApiFailure, runtimeText, type Subscription } from "@/lib/subscriber-api";
+import { api, ApiFailure, positionSettingsText, runtimeText, type Subscription } from "@/lib/subscriber-api";
 
 type Row = Subscription & { stats: { closed: number; netUsdt: number; openPositions: number } };
 
@@ -48,7 +48,7 @@ export default function JournalSubscribers() {
         {row.status === "approved" && (
           <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
             <div><p className="text-[10px] uppercase text-muted-foreground">Ключ</p><p className={row.apiKeyVerifiedAt ? "text-success" : "text-muted-foreground"}>{row.apiKeyVerifiedAt ? `••••${row.apiKeyLast4}` : "нет"}</p></div>
-            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategy ? STRATEGY[row.strategy] ?? row.strategy : "—"}</p></div>
+            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategy ? STRATEGY[row.strategy] ?? row.strategy : "—"}</p><p className="text-[11px] text-muted-foreground">{positionSettingsText(row.positionSettings)}</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Торговля</p><p className="flex items-center gap-1">{row.tradingEnabled ? <><Play className="h-3 w-3 text-success" />вкл</> : <><Pause className="h-3 w-3" />выкл</>}</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Сделки</p><p>{row.stats.closed} закр. · {row.stats.openPositions} откр.</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Прибыль</p><p className={`font-bold tabular ${toneClass(row.stats.closed ? row.stats.netUsdt : null)}`}>{row.stats.closed ? formatUsdt(row.stats.netUsdt) : "—"}</p></div>

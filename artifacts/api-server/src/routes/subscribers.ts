@@ -9,6 +9,8 @@ import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPer
 import { createBingXLiveApi, createBingXOutboundPacer } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
 import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema } from "../bullet-bot/subscriber-trading.mjs";
+// @ts-expect-error JavaScript module of the bot.
+import { ALLOCATION_LIMITS, SUBSCRIBER_LEVERAGE_CHOICES, normalizePositionProfile } from "../bullet-bot/vst-position-profile.mjs";
 
 /**
  * Subscribers (owner's family first):
@@ -35,6 +37,12 @@ function publicView(row: Row) {
     apiKeyLast4: row.api_key_last4 ?? null,
     apiKeyVerifiedAt: row.api_key_verified_at ?? null,
     apiKeyError: row.api_key_error ?? null,
+    positionSettings: {
+      allocationMode: (row.allocation_mode as string | undefined) ?? "percent",
+      allocationValue: Number(row.allocation_value ?? 1),
+      leverage: Number(row.leverage ?? 10),
+      marginMode: (row.margin_mode as string | undefined) ?? "ISOLATED",
+    },
     tradingEnabled: Boolean(row.trading_enabled),
     tradingStartedAt: row.trading_started_at ?? null,
     runtimeStatus: row.runtime_status ?? null,
@@ -110,6 +118,7 @@ router.get("/me/subscription", async (req, res) => {
     subscription: publicView(row),
     strategies: Object.entries(strategies).map(([id, s]) => ({ id, label: s.label, available: s.available })),
     keysConfigured: subscriberKeysConfigured(),
+    positionChoices: { leverage: SUBSCRIBER_LEVERAGE_CHOICES, allocation: ALLOCATION_LIMITS },
   });
 });
 
@@ -196,6 +205,42 @@ router.post("/me/strategy", async (req, res) => {
   await pool.query("UPDATE subscribers SET strategy = $2, version = version + 1, updated_at = now() WHERE id = $1",
     [row.id, strategy]);
   res.json({ strategy });
+});
+
+router.post("/me/position-settings", async (req, res) => {
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
+  // Open positions are managed with the leverage/margin they were opened with.
+  const perf = await performance(row.id);
+  if (perf.openPositions > 0) {
+    return refuse(res, 409, "positions_open", "Дождитесь закрытия открытых сделок, потом меняйте настройки");
+  }
+  const leverage = Number(req.body?.leverage);
+  if (!(SUBSCRIBER_LEVERAGE_CHOICES as number[]).includes(leverage)) {
+    return refuse(res, 422, "leverage", "Такого плеча нет в списке");
+  }
+  let profile: { leverage: number; marginMode: string; allocation: { mode: string; value: number } };
+  try {
+    profile = normalizePositionProfile({
+      leverage,
+      marginMode: String(req.body?.marginMode ?? ""),
+      allocation: { mode: String(req.body?.allocationMode ?? ""), value: Number(req.body?.allocationValue) },
+    });
+  } catch {
+    return refuse(res, 422, "position_settings", "Проверьте значения: процент от 0.1 до 100, сумма от 1");
+  }
+  await pool.query(
+    `UPDATE subscribers SET allocation_mode = $2, allocation_value = $3, leverage = $4, margin_mode = $5,
+       version = version + 1, updated_at = now() WHERE id = $1`,
+    [row.id, profile.allocation.mode, String(profile.allocation.value), profile.leverage, profile.marginMode],
+  );
+  res.json({
+    positionSettings: {
+      allocationMode: profile.allocation.mode, allocationValue: profile.allocation.value,
+      leverage: profile.leverage, marginMode: profile.marginMode,
+    },
+  });
 });
 
 router.post("/me/trading", async (req, res) => {

@@ -9,12 +9,31 @@ export type Subscription = {
   apiKeyLast4: string | null;
   apiKeyVerifiedAt: string | null;
   apiKeyError: string | null;
+  positionSettings: PositionSettings;
   tradingEnabled: boolean;
   tradingStartedAt: string | null;
   runtimeStatus: string | null;
   runtimeReason: string | null;
   runtimeAt: string | null;
 };
+
+export type PositionSettings = {
+  allocationMode: "percent" | "amount";
+  allocationValue: number;
+  leverage: number;
+  marginMode: "ISOLATED" | "CROSSED";
+};
+
+export type PositionChoices = {
+  leverage: number[];
+  allocation: { percent: { min: number; max: number }; amount: { min: number; max: number } };
+};
+
+/** "1% от баланса · изолированная · 10x" */
+export function positionSettingsText(s: PositionSettings): string {
+  const size = s.allocationMode === "percent" ? `${s.allocationValue}% от баланса` : `${s.allocationValue} VST`;
+  return `${size} · ${s.marginMode === "CROSSED" ? "кросс" : "изолированная"} · ${s.leverage}x`;
+}
 
 export type StrategyOption = { id: string; label: string; available: boolean };
 

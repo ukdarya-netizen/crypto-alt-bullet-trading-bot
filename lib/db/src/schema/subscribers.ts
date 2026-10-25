@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, integer, numeric, pgTable, serial, text, timestamp } from "drizzle-orm/pg-core";
 
 /**
  * People who asked to use the trading bot (owner's family first). The owner
@@ -24,6 +24,12 @@ export const subscribersTable = pgTable("subscribers", {
   apiKeyLast4: text("api_key_last4"),
   apiKeyVerifiedAt: timestamp("api_key_verified_at", { withTimezone: true }),
   apiKeyError: text("api_key_error"),
+  /** Per-trade size: "percent" of the total balance or a fixed "amount" (VST) of initial margin. */
+  allocationMode: text("allocation_mode").notNull().default("percent"),
+  allocationValue: numeric("allocation_value").notNull().default("1"),
+  leverage: integer("leverage").notNull().default(10),
+  /** ISOLATED | CROSSED */
+  marginMode: text("margin_mode").notNull().default("ISOLATED"),
   tradingEnabled: boolean("trading_enabled").notNull().default(false),
   /** Signals received before this instant are never traded for this subscriber. */
   tradingStartedAt: timestamp("trading_started_at", { withTimezone: true }),

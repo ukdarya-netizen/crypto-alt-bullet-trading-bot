@@ -1,10 +1,11 @@
 import { sizeVstLongTrade } from "./vst-sizing.mjs";
+import { OWNER_POSITION_PROFILE, allocationBudget } from "./vst-position-profile.mjs";
 
 // Called only after the native preflight's exchange reads have completed.
 // No account/contract/risk verdict is cached across attempts.
 export function refreshVstEntrySizing({
   symbol, stopLoss, policy, balanceData, filters, tiers, fees, funding,
-  leverage, quote, nowMs,
+  leverage, quote, nowMs, positionProfile = OWNER_POSITION_PROFILE,
 }) {
   if (!policy || !Array.isArray(tiers) || !tiers.length) {
     throw new Error("vst_fresh_sizing_inputs_unverified");
@@ -15,7 +16,7 @@ export function refreshVstEntrySizing({
   const vstRows = balanceRows.filter((row) => row?.asset === "VST");
   if (vstRows.length !== 1) throw new Error("vst_fresh_sizing_balance_unverified");
   const maximumNotional = Math.min(
-    Number(vstRows[0].balance) * 0.01 * 10,
+    allocationBudget(positionProfile, vstRows[0].balance) * positionProfile.leverage,
     Number(leverage?.maxPositionLongVal),
   );
   const tier = tiers.find((row) => maximumNotional <= row.maxNotional);
@@ -31,6 +32,7 @@ export function refreshVstEntrySizing({
     maintenanceMarginRate: tier.maintenanceMarginRate,
     stopBufferRate: 0.005, tickSize: 10 ** -filters.pricePrecision,
     maxPositionValue: leverage.maxPositionLongVal,
+    positionProfile,
   });
   if (sizing.status !== "ready") {
     throw new Error(`vst_fresh_sizing_blocked:${sizing.blockers.join(",")}`);

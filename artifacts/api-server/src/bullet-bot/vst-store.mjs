@@ -5487,8 +5487,9 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
         consistentIdentifierAliases(proofPosition, "positionId", "positionID") ===
           split?.positionId &&
         exactDecimalEqual(proofPosition.quantity, coreQuantity) &&
-        proofPosition.side === "Buy" && Number(proofPosition.leverage) === 10 &&
-        proofPosition.marginMode === "ISOLATED";
+        proofPosition.side === "Buy" &&
+        Number(proofPosition.leverage) === Number(expectedPositionSnapshot?.leverage ?? 10) &&
+        proofPosition.marginMode === (expectedPositionSnapshot?.marginMode ?? "ISOLATED");
       const stopParentsValid = [originalStop, coreStop, runnerStop].every((stop) => {
         const parents = [
           stop?.mainOrderId, stop?.mainOrderID,

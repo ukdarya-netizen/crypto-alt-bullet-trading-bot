@@ -10825,3 +10825,59 @@ test("an ambiguous entry is retired as an error only with a read-only proof it n
   assert.equal(submissions, 0, "never resubmitted");
   assert.equal(store.data.positions.length, 0, "never invents a fill");
 });
+
+test("subscriber cross-margin profile prepares CROSSED margin, then its own leverage", async () => {
+  const profile = { leverage: 5, marginMode: "CROSSED", allocation: { mode: "amount", value: 50 } };
+  const signalBody = activePolicy({ stopLoss: "95" });
+  const store = memoryStore(signalBody);
+  const requests = [];
+  let marginMode = "ISOLATED";
+  const broker = guardedBroker(store, {
+    currentPosition: null,
+    onPerform: async ({ request }) => {
+      requests.push(request);
+      if (request.operation === "prepare_margin_mode") marginMode = request.targetMarginMode;
+    },
+    reconcile: async ({ request }) => request.operation === "prepare_margin_mode"
+      ? { verified: true, status: "filled", marginMode }
+      : {
+        verified: true, status: "filled",
+        position: { verified: true, marginMode, leverage: request.leverage },
+      },
+  });
+  broker.readPlanningInputs = async () => ({
+    ...safePlanningInputs(),
+    marginMode,
+    marginModeVerified: marginMode === "CROSSED",
+    requiresIsolatedMarginPreparation: marginMode !== "CROSSED",
+  });
+  const worker = createVstWorker({
+    store, broker, clock: () => NOW, positionProfile: profile,
+    sizingLimits: { environment: "vst", maxQuoteAgeMs: 10_000, maxSlippageBps: 100 },
+  });
+
+  const first = await worker.runOnce();
+  assert.equal(first.kind, "prepared");
+  assert.equal(requests[0].operation, "prepare_margin_mode");
+  assert.equal(requests[0].targetMarginMode, "CROSSED");
+
+  const second = await worker.runOnce();
+  assert.equal(second.kind, "prepared", JSON.stringify(second));
+  assert.equal(requests[1].operation, "set_isolated_leverage");
+  assert.equal(requests[1].leverage, 5);
+  assert.equal(requests[1].marginMode, "CROSSED");
+});
+
+test("owner worker still refuses a symbol that is in cross margin without preparation", async () => {
+  const signalBody = activePolicy({ stopLoss: "95" });
+  const store = memoryStore(signalBody);
+  const broker = guardedBroker(store, { currentPosition: null });
+  broker.readPlanningInputs = async () =>
+    ({ ...safePlanningInputs({ marginMode: "CROSSED" }), marginModeVerified: true });
+  const result = await createVstWorker({
+    store, broker, clock: () => NOW,
+    sizingLimits: { environment: "vst", maxQuoteAgeMs: 10_000, maxSlippageBps: 100 },
+  }).runOnce();
+  assert.equal(result.kind, "rejected");
+  assert.equal(result.reason, "vst_margin_mode_state_not_verified_or_preparable");
+});

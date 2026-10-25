@@ -93,7 +93,7 @@ for (const name of ["symbol", "fillSymbol"]) kinds[name] = "symbol";
 const enums = {
   side: ["Buy", "Sell", "BUY", "SELL"],
   positionSide: ["LONG", "SHORT", "BOTH"],
-  marginMode: ["ISOLATED", "CROSS"],
+  marginMode: ["ISOLATED", "CROSS", "CROSSED"],
   orderStatus: ["NEW", "FILLED", "PENDING", "PARTIALLY_FILLED", "CANCELED",
     "CANCELLED", "REJECTED", "EXPIRED"],
   orderType: ["MARKET", "LIMIT", "STOP", "STOP_MARKET", "TAKE_PROFIT_MARKET"],

@@ -1,3 +1,4 @@
+import { OWNER_POSITION_PROFILE, allocationBudget, isOwnerProfile, normalizePositionProfile } from "./vst-position-profile.mjs";
 import { createHash } from "node:crypto";
 import { directCloseEvidenceValid } from "./source-command-contract.mjs";
 import { FULL_TAKE_REASON, fullTakeEvidenceValid } from "./fixed-price-take-profit.mjs";
@@ -589,6 +590,15 @@ export function createVstBroker({
   if (!validAccountAlias(accountId)) {
     throw new TypeError("accountId must be a stable operator-assigned VST account alias");
   }
+  // Leverage and margin mode every position of this broker must have. Taken
+  // from the API client so both layers always agree (owner: isolated 10x).
+  const PROFILE = normalizePositionProfile(api.positionProfile ?? OWNER_POSITION_PROFILE);
+  const PROFILE_LEVERAGE = PROFILE.leverage;
+  const PROFILE_MARGIN = PROFILE.marginMode;
+  const profileMarginIs = (value) => {
+    const mode = String(value ?? "").toUpperCase();
+    return (mode === "CROSS" ? "CROSSED" : mode) === PROFILE_MARGIN;
+  };
   const supportsHistoricalCloseProof = api.supportsCompleteFillHistory === true
     ? true
     : api.supportsCompleteFillHistory === false ? false : undefined;
@@ -765,7 +775,7 @@ export function createVstBroker({
       readCoalesced("getMarginType", symbol),
       readCoalesced("getLeverage", symbol),
     ]);
-    if (marginMode === "ISOLATED" && Number(leverage?.longLeverage) === 10 &&
+    if (marginMode === PROFILE_MARGIN && Number(leverage?.longLeverage) === PROFILE_LEVERAGE &&
         Number.isFinite(now)) {
       capabilitySettingsMemo.set(symbol, { at: now, marginMode, leverage });
     } else {
@@ -860,8 +870,8 @@ export function createVstBroker({
       api.getOpenOrders(symbol),
       readGlobalAccountRows(),
     ]);
-    if (settings.mode !== "HEDGE" || settings.marginMode !== "ISOLATED" ||
-        Number(settings.leverage.longLeverage) !== 10 ||
+    if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN ||
+        Number(settings.leverage.longLeverage) !== PROFILE_LEVERAGE ||
         !Number.isFinite(Number(settings.leverage.shortLeverage)) ||
         Number(settings.leverage.shortLeverage) <= 0 ||
         !Array.isArray(rows) || !Array.isArray(orders)) {
@@ -2249,8 +2259,8 @@ export function createVstBroker({
           ? activePositions[0] : null;
         const symbolOrders = openOrders.filter((row) => row?.symbol === name);
         if (!position || mode !== "HEDGE" ||
-            !["ISOLATED"].includes(String(marginType).toUpperCase()) ||
-            Number(leverage?.longLeverage) !== 10 || symbolOrders.length !== 2) return null;
+            !profileMarginIs(marginType) ||
+            Number(leverage?.longLeverage) !== PROFILE_LEVERAGE || symbolOrders.length !== 2) return null;
         const originalStop = checkStop(queriedOriginal, symbolOrders, original,
           originalId, total);
         const coreStop = checkStop(queriedCore, symbolOrders, core, coreId,
@@ -6292,8 +6302,8 @@ export function createVstBroker({
           position.positionId !== details.positionId ||
           !sameDecimal(exactDecimal(position.quantity,
             "runner_recovery_final_position_snapshot"), coreAmount) ||
-          position.side !== "Buy" || Number(position.leverage) !== 10 ||
-          position.marginMode !== "ISOLATED") return unknown;
+          position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+          position.marginMode !== PROFILE_MARGIN) return unknown;
 
       // All per-order, history, fill, scoped position, and metadata reads are
       // complete. This timestamp anchors the final global account pair below.
@@ -6674,8 +6684,8 @@ export function createVstBroker({
           position.positionId !== details.positionId ||
           !sameDecimal(exactDecimal(position.quantity,
             "sent_runner_recovery_final_position_snapshot"), coreAmount) ||
-          position.side !== "Buy" || Number(position.leverage) !== 10 ||
-          position.marginMode !== "ISOLATED") return unknown;
+          position.side !== "Buy" || Number(position.leverage) !== PROFILE_LEVERAGE ||
+          position.marginMode !== PROFILE_MARGIN) return unknown;
 
       // This timestamp anchors the final global account pair. All historical,
       // per-order, fill, scoped-position, and metadata reads are already done.
@@ -6798,7 +6808,7 @@ export function createVstBroker({
         quote?.symbol !== name) {
       throw new Error("bingx_vst_planning_reads_unverified");
     }
-    const requiresIsolatedMarginPreparation = settings.marginMode === "CROSSED";
+    const requiresIsolatedMarginPreparation = settings.marginMode !== PROFILE_MARGIN;
     // openSignal performs a fresh global account read AFTER planning and
     // checks this symbol for exposure immediately before any mutation.
     // Duplicating those same two signed reads here slowed every preparation
@@ -6809,7 +6819,7 @@ export function createVstBroker({
           typeof api.setVstIsolatedMarginForFlatSymbol !== "function") {
       throw new Error("bingx_vst_symbol_not_ready_flat_hedge_isolated");
     }
-    if (Number(settings.leverage.longLeverage) !== 10 &&
+    if (Number(settings.leverage.longLeverage) !== PROFILE_LEVERAGE &&
         (!Number.isFinite(Number(settings.leverage.longLeverage)) ||
           Number(settings.leverage.longLeverage) <= 0 ||
           typeof api.setVstLongLeverage10 !== "function")) {
@@ -6829,7 +6839,9 @@ export function createVstBroker({
       throw new Error("bingx_vst_total_balance_not_unique");
     }
     const totalVstBalance = strictNumber(vstBalances[0].balance, "total_vst_balance");
-    const worstCaseNotional = totalVstBalance * 0.01 * 10;
+    const worstCaseNotional = isOwnerProfile(PROFILE)
+      ? totalVstBalance * 0.01 * 10
+      : allocationBudget(PROFILE, totalVstBalance) * PROFILE_LEVERAGE;
     if (!Number.isFinite(worstCaseNotional) || worstCaseNotional <= 0) {
       throw new Error("bingx_vst_worst_case_notional_invalid");
     }
@@ -6862,7 +6874,7 @@ export function createVstBroker({
       quote: { price: finitePositive(quote.markPrice, "quote_price"), observedAtMs: quoteAt },
       filters,
       marginMode: settings.marginMode,
-      marginModeVerified: settings.marginMode === "ISOLATED",
+      marginModeVerified: settings.marginMode === PROFILE_MARGIN,
       requiresIsolatedMarginPreparation,
       risk: {
         // The exchange's per-symbol maximum position value at the currently
@@ -8373,12 +8385,12 @@ export function createVstBroker({
       const longLeverage = strictNumber(settings?.leverage?.longLeverage,
         "raise_stop_settings_long_leverage");
       if (settings?.mode !== "HEDGE" ||
-          settings?.marginMode !== "ISOLATED" ||
-          longLeverage !== 10) {
+          settings?.marginMode !== PROFILE_MARGIN ||
+          longLeverage !== PROFILE_LEVERAGE) {
         return refuse("position_settings", {
           positionMode: evidencePair("HEDGE", settings?.mode),
-          marginMode: evidencePair("ISOLATED", settings?.marginMode),
-          leverage: evidencePair(10, longLeverage),
+          marginMode: evidencePair(PROFILE_MARGIN, settings?.marginMode),
+          leverage: evidencePair(PROFILE_LEVERAGE, longLeverage),
         });
       }
       // The earlier native lookups and immutable history are not current
@@ -8407,10 +8419,10 @@ export function createVstBroker({
           expectedQuantity) ||
           Object.hasOwn(active[0], "leverage") &&
             strictNumber(active[0].leverage,
-              "raise_stop_native_position_leverage") !== 10 ||
+              "raise_stop_native_position_leverage") !== PROFILE_LEVERAGE ||
           ["marginMode", "marginType"].some((field) =>
             Object.hasOwn(active[0], field) &&
-            active[0][field] !== "ISOLATED") ||
+            !profileMarginIs(active[0][field])) ||
           !Array.isArray(orders) || orders.length !== 1 ||
           !strictActiveOrder(orders?.[0])) {
         return refuse("position_shape", {
@@ -8443,8 +8455,8 @@ export function createVstBroker({
       if (!Number.isSafeInteger(verifiedPositionAt) ||
           verifiedPosition?.verified !== true ||
           verifiedPosition.positionMode !== "HEDGE" ||
-          verifiedPosition.marginMode !== "ISOLATED" ||
-          Number(verifiedPosition.leverage) !== 10 ||
+          verifiedPosition.marginMode !== PROFILE_MARGIN ||
+          Number(verifiedPosition.leverage) !== PROFILE_LEVERAGE ||
           verifiedPosition.positionId !== contextPositionId ||
           !sameDecimal(exactDecimal(verifiedPosition.quantity,
             "raise_stop_verified_position_quantity"), expectedQuantity) ||
@@ -8460,8 +8472,8 @@ export function createVstBroker({
           positionSettingsValid: evidencePair(true,
             verifiedPosition?.verified === true &&
             verifiedPosition.positionMode === "HEDGE" &&
-            verifiedPosition.marginMode === "ISOLATED" &&
-            Number(verifiedPosition.leverage) === 10),
+            verifiedPosition.marginMode === PROFILE_MARGIN &&
+            Number(verifiedPosition.leverage) === PROFILE_LEVERAGE),
           positionIdentityMatches: evidencePair(contextPositionId,
             verifiedPosition?.positionId),
           stopIdentityMatches: evidencePair(nativeStopId,
@@ -8625,9 +8637,9 @@ export function createVstBroker({
         sameDecimal(exactDecimal(active[0].positionAmt,
           "adopted_stop_position_quantity"), quantity) &&
         (!Object.hasOwn(active[0], "leverage") ||
-          strictNumber(active[0].leverage, "adopted_stop_leverage") === 10) &&
+          strictNumber(active[0].leverage, "adopted_stop_leverage") === PROFILE_LEVERAGE) &&
         !["marginMode", "marginType"].some((field) =>
-          Object.hasOwn(active[0], field) && active[0][field] !== "ISOLATED");
+          Object.hasOwn(active[0], field) && !profileMarginIs(active[0][field]));
     };
     const [initialPositions, initialOrders] = await Promise.all([
       api.getPositions(request.symbol), api.getOpenOrders(request.symbol),
@@ -8697,8 +8709,8 @@ export function createVstBroker({
     const settings = await readSettings(request.symbol);
     const leverage = strictNumber(settings?.leverage?.longLeverage,
       "adopted_stop_settings_leverage");
-    if (settings.mode !== "HEDGE" || settings.marginMode !== "ISOLATED" ||
-        leverage !== 10) return failed;
+    if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN ||
+        leverage !== PROFILE_LEVERAGE) return failed;
 
     // A second fresh pair is the current-state anchor. Compare protection and
     // position identity facts, not mark/PnL/funding fields which legitimately
@@ -9215,7 +9227,7 @@ export function createVstBroker({
         const flatWithoutOrders = accountRows.positions.every((row) =>
           row.symbol !== exchangeSymbolForPrep || Number(row.positionAmt) === 0) &&
           accountRows.openOrders.every((row) => row.symbol !== exchangeSymbolForPrep);
-        const verified = mode === "HEDGE" && marginMode === "ISOLATED" &&
+        const verified = mode === "HEDGE" && marginMode === PROFILE_MARGIN &&
           flatWithoutOrders;
         return {
           verified,
@@ -9231,9 +9243,9 @@ export function createVstBroker({
       const position = await readPosition(request.symbol, {
         persistedPosition: positionSnapshotFromRequest(request) ?? undefined,
       });
-      const verified = settings.marginMode === "ISOLATED" &&
+      const verified = settings.marginMode === PROFILE_MARGIN &&
         settings.mode === "HEDGE" &&
-        Number(settings.leverage.longLeverage) === 10;
+        Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE;
       return {
         verified,
         status: verified ? "filled" : "unknown",
@@ -9486,7 +9498,7 @@ export function createVstBroker({
           !["CROSSED", "ISOLATED"].includes(marginMode)) {
         throw new Error("bingx_vst_isolated_margin_preparation_requires_hedge_crossed_mode");
       }
-      if (marginMode === "ISOLATED") return;
+      if (marginMode === PROFILE_MARGIN) return;
       if (typeof api.setVstIsolatedMarginForFlatSymbol !== "function") {
         throw new Error("bingx_vst_isolated_margin_preparation_adapter_unavailable");
       }
@@ -9497,10 +9509,10 @@ export function createVstBroker({
 
     if (request.operation === "set_isolated_leverage") {
       const settings = await readSettings(symbol);
-      if (settings.mode !== "HEDGE" || settings.marginMode !== "ISOLATED") {
+      if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN) {
         throw new Error("bingx_vst_hedge_isolated_margin_must_be_exchange_verified");
       }
-      if (Number(settings.leverage.longLeverage) === 10) return;
+      if (Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE) return;
       await performMutation("setVstLongLeverage10", symbol);
       return;
     }
@@ -9509,13 +9521,13 @@ export function createVstBroker({
       if (request.entryOrderType !== "MARKET") {
         throw new Error("legacy_vst_entry_request_requires_reconciliation");
       }
-      if (request.side !== "Buy" || request.marginMode !== "ISOLATED" ||
-          Number(request.leverage) !== 10) {
+      if (request.side !== "Buy" || request.marginMode !== PROFILE_MARGIN ||
+          Number(request.leverage) !== PROFILE_LEVERAGE) {
         throw new Error("bingx_vst_entry_request_not_supported");
       }
       const settings = await readSettings(symbol);
-      if (settings.mode !== "HEDGE" || settings.marginMode !== "ISOLATED" ||
-          Number(settings.leverage.longLeverage) !== 10) {
+      if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN ||
+          Number(settings.leverage.longLeverage) !== PROFILE_LEVERAGE) {
         throw new Error("bingx_vst_entry_requires_verified_hedge_isolated_long10");
       }
       apiIntentIds.set(exchangeClientId, { phase, status: "submitted" });
@@ -10210,7 +10222,7 @@ export function createVstBroker({
       strictNumber(row.positionAmt, "stop_transfer_position_quantity", { allowZero: true }) !== 0);
     const expected = Object.values(prior.verifiedProtectiveStops ?? {});
     return Date.now() - startedAt <= 10_000 && settings.mode === "HEDGE" &&
-      settings.marginMode === "ISOLATED" && Number(settings.leverage.longLeverage) === 10 &&
+      settings.marginMode === PROFILE_MARGIN && Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
       active.length === 1 && active[0].positionSide === "LONG" &&
       [active[0].positionId, active[0].positionID].filter(v => v != null)
         .every(v => String(v) === prior.exchangePositionId) &&
@@ -10333,8 +10345,8 @@ export function createVstBroker({
     const canPrepareSettings = settingsBySymbol.some((settings, index) => {
       if (settings.mode !== "HEDGE" ||
           !["ISOLATED", "CROSSED"].includes(settings.marginMode)) return false;
-      if (settings.marginMode === "CROSSED" && !hasIsolatedMarginPreparation) return false;
-      if (Number(settings.leverage.longLeverage) === 10) return true;
+      if (settings.marginMode !== PROFILE_MARGIN && !hasIsolatedMarginPreparation) return false;
+      if (Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE) return true;
       return accountFlatWithoutOrders &&
         Number(settings.leverage.longLeverage) > 0;
     });
@@ -10520,8 +10532,8 @@ export function createVstBroker({
           const index = probeSymbols.indexOf(symbol);
           if (index < 0) return false;
           const settings = settingsBySymbol[index];
-          return settings.mode === "HEDGE" && settings.marginMode === "ISOLATED" &&
-            Number(settings.leverage.longLeverage) === 10;
+          return settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
+            Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE;
         })()
       // Many symbols can each carry their own independently verified
       // position concurrently -- every active symbol must pass this check
@@ -10537,8 +10549,8 @@ export function createVstBroker({
           row.symbol === symbolNameValue);
         const matchingOrders = accountOrders.filter((row) =>
           row.symbol === symbolNameValue);
-        return Number(settings.leverage.longLeverage) === 10 &&
-          settings.mode === "HEDGE" && settings.marginMode === "ISOLATED" &&
+        return Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+          settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
           verifiedActiveLongProtection(symbol, matchingPositions, matchingOrders);
       }) && accountOrders.every((row) => activeSymbolSet.has(row.symbol));
     const canManageImpulse = missingImpulseAdapters.length === 0 &&
@@ -10553,8 +10565,8 @@ export function createVstBroker({
       if (index < 0) return true;
       const settings = settingsBySymbol[index];
       const name = symbolName(symbol);
-      return !(Number(settings.leverage.longLeverage) === 10 &&
-        settings.mode === "HEDGE" && settings.marginMode === "ISOLATED" &&
+      return !(Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+        settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
         verifiedActiveLongProtection(symbol,
           activePositions.filter((row) => row.symbol === name),
           accountOrders.filter((row) => row.symbol === name)));
@@ -10586,8 +10598,8 @@ export function createVstBroker({
           row.symbol === name);
         const matchingOrders = accountOrders.filter((row) =>
           row.symbol === name);
-        return Number(settings.leverage.longLeverage) === 10 &&
-          settings.mode === "HEDGE" && settings.marginMode === "ISOLATED" &&
+        return Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+          settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
           verifiedActiveLongProtection(symbol, matchingPositions, matchingOrders);
       });
     // This only advertises that the current freshly-read VST account is in a
@@ -10681,6 +10693,7 @@ export function createVstBroker({
   }
 
   return Object.freeze({
+    positionProfile: PROFILE,
     proveEntryNotExecuted,
     stopTransferJournalVersion: typeof api.withStopTransferJournal === "function" ? 1 : 0,
     verifyPreparedStopTransfer,

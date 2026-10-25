@@ -1,4 +1,5 @@
-const LEVERAGE = 10;
+import { OWNER_POSITION_PROFILE, allocationBudget, isOwnerProfile, normalizePositionProfile } from "./vst-position-profile.mjs";
+
 const VST_BUDGET_RATE = 0.01;
 const CENTS = 100;
 
@@ -104,8 +105,12 @@ export function sizeVstLongTrade({
   tickSize,
   maxPositionValue,
   quantityUnitMultiple = 1,
+  positionProfile = OWNER_POSITION_PROFILE,
 }) {
   if (environment !== "vst") throw new Error("VST sizing is unavailable outside the VST environment");
+  const profile = normalizePositionProfile(positionProfile);
+  const LEVERAGE = profile.leverage;
+  const isolated = profile.marginMode === "ISOLATED";
   if (typeof symbol !== "string" || !/^[A-Z0-9]{1,20}USDT$/.test(symbol)) {
     throw new Error("VST sizing requires a canonical USDT perpetual symbol");
   }
@@ -148,7 +153,9 @@ export function sizeVstLongTrade({
   const pricePrecision = precision(filters?.pricePrecision, "pricePrecision");
   if (filters?.maxLeverage !== undefined &&
       (!Number.isFinite(Number(filters.maxLeverage)) || Number(filters.maxLeverage) < LEVERAGE)) {
-    throw new Error("Contract does not support isolated leverage 10");
+    throw new Error(isOwnerProfile(profile)
+      ? "Contract does not support isolated leverage 10"
+      : `Contract does not support leverage ${LEVERAGE}`);
   }
   const minQuantity = numeric(filters?.minQuantity, "minimum quantity");
   const minNotional = numeric(filters?.minNotional, "minimum notional");
@@ -177,10 +184,12 @@ export function sizeVstLongTrade({
   const maxPositionValueVst = Number(maxPositionValueDecimal.units) / Number(maxPositionValueDecimal.scale);
 
   const { balance, balanceDecimal, availableMargin } = findVstBalance(balanceSnapshot);
-  const budgetDecimal = {
-    units: balanceDecimal.units,
-    scale: balanceDecimal.scale * 100n,
-  };
+  // Owner: exactly 1% of the total balance (exact decimal). A subscriber's
+  // percent or fixed amount is rounded down to 1e-8 VST.
+  const budgetDecimal = isOwnerProfile(profile)
+    ? { units: balanceDecimal.units, scale: balanceDecimal.scale * 100n }
+    : { units: BigInt(Math.floor(allocationBudget(profile, balance) * 1e8)), scale: 100_000_000n };
+  if (budgetDecimal.units <= 0n) throw new RangeError("VST allocation budget must be positive");
   const budget = Number(budgetDecimal.units) / Number(budgetDecimal.scale);
 
   // Round the quote-plus-slippage limit upward to the instrument's price
@@ -236,7 +245,9 @@ export function sizeVstLongTrade({
   const finalRawTopUp = Math.max(
     0, (liquidationEstimate + stopBufferVst - stop) * finalQuantityNumber,
   );
-  const finalTopUp = finalRawTopUp > 0 ? roundUpToCents(finalRawTopUp) + 0.01 : 0;
+  // Cross margin has no per-position margin to top up: the whole account
+  // backs the position and the protective stop closes it first.
+  const finalTopUp = isolated && finalRawTopUp > 0 ? roundUpToCents(finalRawTopUp) + 0.01 : 0;
   const finalAllocatedMargin = finalInitialMargin + finalTopUp;
   const feeReserveVst = finalNotional * feeRate + finalQuantityNumber * stop * feeRate;
   const requiredAvailableVst = finalAllocatedMargin + feeReserveVst;
@@ -257,10 +268,11 @@ export function sizeVstLongTrade({
     symbol,
     marginAsset: "VST",
     leverage: LEVERAGE,
-    marginMode: "ISOLATED",
+    marginMode: profile.marginMode,
     balanceSnapshotVst: balance,
     initialBudgetVst: budget,
-    allocationBudgetRate: VST_BUDGET_RATE,
+    allocationBudgetRate: isOwnerProfile(profile) ? VST_BUDGET_RATE : null,
+    allocation: profile.allocation,
     marketBudgetHeadroomRate: Number(marketBudgetHeadroomBps) / 10_000,
     signalReferencePrice: expectedNumber,
     signalPriceDeviationPct: Number(deviationPct.toFixed(6)),

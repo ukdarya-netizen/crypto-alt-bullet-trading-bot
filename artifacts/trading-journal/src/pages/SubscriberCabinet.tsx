@@ -5,11 +5,30 @@ import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } 
 import { BrandLockup } from "@/components/brand";
 import { formatPercent, formatUsdt, inPeriod, summarize, toneClass, closeReasonGroup } from "@/lib/performance";
 import {
-  api, ApiFailure, runtimeText, STRATEGY_TEXT,
-  type PerformanceTrade, type StrategyOption, type Subscription,
+  api, ApiFailure, positionSettingsText, runtimeText, STRATEGY_TEXT,
+  type PerformanceTrade, type PositionChoices, type PositionSettings, type StrategyOption, type Subscription,
 } from "@/lib/subscriber-api";
 
-type SubscriptionResponse = { subscription: Subscription; strategies: StrategyOption[]; keysConfigured: boolean };
+type SubscriptionResponse = {
+  subscription: Subscription; strategies: StrategyOption[]; keysConfigured: boolean; positionChoices: PositionChoices;
+};
+
+function Segmented<T extends string>({ value, options, onChange, disabled }: {
+  value: T; options: { id: T; label: string }[]; onChange: (id: T) => void; disabled: boolean;
+}) {
+  return (
+    <div className="grid grid-cols-2 border border-border">
+      {options.map((option) => (
+        <button key={option.id} type="button" disabled={disabled} onClick={() => onChange(option.id)}
+          aria-pressed={value === option.id}
+          className={`h-11 px-3 text-sm font-bold transition-colors disabled:cursor-not-allowed ${
+            value === option.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 function Step({ n, title, done, children }: { n: number; title: string; done: boolean; children: ReactNode }) {
   return (
@@ -142,6 +161,84 @@ function StrategyStep({ sub, strategies, onChanged }: { sub: Subscription; strat
   );
 }
 
+function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: PositionChoices; onChanged: () => void }) {
+  const saved = sub.positionSettings;
+  const [mode, setMode] = useState<PositionSettings["allocationMode"]>(saved.allocationMode);
+  const [value, setValue] = useState(String(saved.allocationValue));
+  const [leverage, setLeverage] = useState(saved.leverage);
+  const [margin, setMargin] = useState<PositionSettings["marginMode"]>(saved.marginMode);
+  const [message, setMessage] = useState<{ text: string; bad: boolean } | null>(null);
+  const limits = choices.allocation[mode];
+  const numeric = Number(value.replace(",", "."));
+  const valid = Number.isFinite(numeric) && numeric >= limits.min && numeric <= limits.max;
+  const changed = mode !== saved.allocationMode || numeric !== saved.allocationValue ||
+    leverage !== saved.leverage || margin !== saved.marginMode;
+  const locked = sub.tradingEnabled;
+  const save = useMutation({
+    mutationFn: () => api("/me/position-settings", {
+      method: "POST", body: { allocationMode: mode, allocationValue: numeric, leverage, marginMode: margin },
+    }),
+    onSuccess: () => { setMessage({ text: "Сохранено", bad: false }); onChanged(); },
+    onError: (e) => setMessage({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
+  });
+  const example = valid
+    ? mode === "percent"
+      ? `При балансе 10 000 VST: в сделку ${(10_000 * numeric / 100).toLocaleString("ru-RU")} VST своих, позиция ${(10_000 * numeric / 100 * leverage).toLocaleString("ru-RU")} VST.`
+      : `В сделку ${numeric.toLocaleString("ru-RU")} VST своих, позиция ${(numeric * leverage).toLocaleString("ru-RU")} VST.`
+    : mode === "percent" ? `Процент от ${limits.min} до ${limits.max}.` : `Сумма от ${limits.min} VST.`;
+  return (
+    <Step n={3} title="Размер сделки" done={!changed}>
+      <div className="space-y-5">
+        <div className="space-y-2">
+          <p className="text-xs font-bold uppercase text-muted-foreground">Сколько своих денег в одну сделку</p>
+          <Segmented value={mode} disabled={locked} onChange={(next) => { setMode(next); setValue(next === "percent" ? "1" : "10"); }}
+            options={[{ id: "percent", label: "Процент от баланса" }, { id: "amount", label: "Сумма" }]} />
+          <div className="flex items-center gap-2">
+            <input value={value} onChange={(e) => setValue(e.target.value)} inputMode="decimal" disabled={locked}
+              className={`h-11 w-32 border px-3 text-sm tabular ${valid ? "border-input" : "border-destructive"}`} />
+            <span className="text-sm text-muted-foreground">{mode === "percent" ? "% от баланса" : "VST"}</span>
+          </div>
+          <p className={`text-xs ${valid ? "text-muted-foreground" : "text-destructive"}`}>{example}</p>
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs font-bold uppercase text-muted-foreground">Плечо</p>
+          <div className="flex flex-wrap gap-2">
+            {choices.leverage.map((option) => (
+              <button key={option} type="button" disabled={locked} onClick={() => setLeverage(option)}
+                aria-pressed={leverage === option}
+                className={`h-10 min-w-12 border px-3 text-sm font-bold disabled:cursor-not-allowed ${
+                  leverage === option ? "border-primary bg-primary text-primary-foreground" : "border-border hover:border-primary/40"}`}>
+                {option}x
+              </button>
+            ))}
+          </div>
+          {leverage > 10 && <p className="text-xs text-amber-300">Чем выше плечо, тем ближе ликвидация к цене входа.</p>}
+        </div>
+        <div className="space-y-2">
+          <p className="text-xs font-bold uppercase text-muted-foreground">Маржа</p>
+          <Segmented value={margin} disabled={locked} onChange={setMargin}
+            options={[{ id: "ISOLATED", label: "Изолированная" }, { id: "CROSSED", label: "Кросс" }]} />
+          <p className="text-xs text-muted-foreground">
+            {margin === "ISOLATED"
+              ? "Каждая сделка рискует только своей маржой. Если стоп далеко, бот сам довносит маржу, чтобы ликвидация была ниже стопа."
+              : "Сделку держит весь баланс счёта: ликвидация дальше, но при сильном движении против рискует весь счёт. Защищает стоп-лосс из сигнала."}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" onClick={() => { setMessage(null); save.mutate(); }}
+            disabled={locked || !valid || !changed || save.isPending}
+            className="h-11 bg-primary px-5 text-sm font-bold text-primary-foreground disabled:opacity-40">
+            {save.isPending ? "Сохраняю…" : "Сохранить"}
+          </button>
+          <span className="text-xs text-muted-foreground">Сейчас: {positionSettingsText(saved)}</span>
+        </div>
+        {locked && <p className="text-xs text-muted-foreground">Менять можно после «Стоп» и закрытия открытых сделок.</p>}
+        {message && <p className={`text-sm ${message.bad ? "text-destructive" : "text-success"}`}>{message.text}</p>}
+      </div>
+    </Step>
+  );
+}
+
 function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const toggle = useMutation({
@@ -153,7 +250,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
   const ready = Boolean(sub.apiKeyVerifiedAt && sub.strategy);
   const dot = { ok: "bg-success", wait: "bg-amber-400", bad: "bg-destructive", off: "bg-muted-foreground" }[state.tone];
   return (
-    <Step n={3} title="Торговля" done={sub.tradingEnabled}>
+    <Step n={4} title="Торговля" done={sub.tradingEnabled}>
       <p className="mb-4 flex items-start gap-2 text-sm"><span className={`mt-1.5 h-2 w-2 shrink-0 ${dot}`} />{state.text}</p>
       {sub.tradingEnabled ? (
         <button type="button" onClick={() => toggle.mutate(false)} disabled={toggle.isPending}
@@ -168,7 +265,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
       )}
       {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала шаги 1 и 2.</p>}
       <p className="mt-4 text-xs text-muted-foreground">
-        Торговля идёт на демо-счёте BingX VST. На каждую сделку бот берёт 1% баланса, плечо x10, изолированная маржа.
+        Торговля идёт на демо-счёте BingX VST. Размер сделки: {positionSettingsText(sub.positionSettings)}.
         «Стоп» сразу прекращает новые входы; уже открытые сделки бот доводит до закрытия.
       </p>
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
@@ -219,7 +316,7 @@ export default function SubscriberCabinet() {
   if (query.error || !query.data) {
     return <Shell><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />} title="Не удалось загрузить" text="Обновите страницу чуть позже." /></Shell>;
   }
-  const { subscription: sub, strategies, keysConfigured } = query.data;
+  const { subscription: sub, strategies, keysConfigured, positionChoices } = query.data;
   if (sub.status === "pending") {
     return <Shell><Notice icon={<Clock className="h-10 w-10 text-primary" />} title="Заявка отправлена"
       text="Владелец получит её и одобрит. Эта страница обновится сама, ничего нажимать не нужно." /></Shell>;
@@ -237,6 +334,7 @@ export default function SubscriberCabinet() {
       </div>
       <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
       <StrategyStep sub={sub} strategies={strategies} onChanged={refresh} />
+      <SizeStep key={JSON.stringify(sub.positionSettings)} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
       <Results />
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>

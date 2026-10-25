@@ -20,6 +20,16 @@ import { createVstWorker } from "./vst-worker.mjs";
 import { createIndependentWorkerTickScheduler } from "./worker-tick-scheduler.mjs";
 import { decryptSecret, forbiddenPermissions, readBingXKeyPermissions } from "./subscriber-keys.mjs";
 import { VST_ENTRY_BATCH_LIMITS, VST_SIZING_LIMITS, VST_WRITE_PATHS } from "./server.mjs";
+import { normalizePositionProfile } from "./vst-position-profile.mjs";
+
+/** The subscriber's chosen size, leverage and margin mode (validated). */
+export function subscriberPositionProfile(row) {
+  return normalizePositionProfile({
+    leverage: Number(row.leverage ?? 10),
+    marginMode: row.margin_mode ?? "ISOLATED",
+    allocation: { mode: row.allocation_mode ?? "percent", value: Number(row.allocation_value ?? 1) },
+  });
+}
 
 /** Strategies a subscriber can pick. Only executable ones can be started. */
 export const SUBSCRIBER_STRATEGIES = Object.freeze({
@@ -62,13 +72,24 @@ const SUBSCRIBERS_DDL = `CREATE TABLE IF NOT EXISTS subscribers (
   updated_at timestamp with time zone DEFAULT now() NOT NULL,
   CONSTRAINT subscribers_clerk_user_id_unique UNIQUE (clerk_user_id)
 )`;
+// Columns added after the first release; ADD COLUMN IF NOT EXISTS is idempotent.
+const SUBSCRIBERS_UPGRADES = [
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS allocation_mode text DEFAULT 'percent' NOT NULL",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS allocation_value numeric DEFAULT '1' NOT NULL",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS leverage integer DEFAULT 10 NOT NULL",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS margin_mode text DEFAULT 'ISOLATED' NOT NULL",
+];
 const ensuredPools = new WeakMap();
 
 /** Idempotent; the first call per pool creates the table, later calls reuse the result. */
 export function ensureSubscribersTable(pool) {
   let pending = ensuredPools.get(pool);
   if (!pending) {
-    pending = pool.query(SUBSCRIBERS_DDL).then(() => true);
+    pending = (async () => {
+      await pool.query(SUBSCRIBERS_DDL);
+      for (const statement of SUBSCRIBERS_UPGRADES) await pool.query(statement);
+      return true;
+    })();
     pending.catch(() => ensuredPools.delete(pool));
     ensuredPools.set(pool, pending);
   }
@@ -136,6 +157,7 @@ export function createSubscriberTradingManager({
     if (!Number.isFinite(stopBufferRate) || stopBufferRate <= 0 || stopBufferRate >= 1) {
       throw new Error("BULLET_VST_STOP_BUFFER_RATE is not configured");
     }
+    const positionProfile = subscriberPositionProfile(sub);
     const credentials = Object.freeze({
       key: decryptSecret(sub.api_key_encrypted),
       secret: decryptSecret(sub.api_secret_encrypted),
@@ -152,6 +174,7 @@ export function createSubscriberTradingManager({
       credentials: () => credentials,
       requestPacer: createBingXOutboundPacer(),
       writePermission: ({ method, path }) => method !== "GET" && VST_WRITE_PATHS.has(path),
+      positionProfile,
     });
     const broker = createVstBroker({
       api, accountId: `sub-${id}`, canarySymbols: ["BTCUSDT"], stopBufferRate,
@@ -219,7 +242,7 @@ export function createSubscriberTradingManager({
       });
     }
     runners.set(id, runner);
-    log(`Subscriber ${id} trading worker started (${sub.strategy})`);
+    log(`Subscriber ${id} trading worker started (${sub.strategy}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
     await setRuntime(id, "started");
     return runner;
   }

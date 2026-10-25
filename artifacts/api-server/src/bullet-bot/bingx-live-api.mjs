@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { refreshVstEntrySizing } from "./vst-fresh-entry-sizing.mjs";
+import { OWNER_POSITION_PROFILE, allocationBudget, normalizePositionProfile } from "./vst-position-profile.mjs";
 import {
   instrumentVstApi, noteVstApiDiagnosticRequest, recordVstDiagnostic,
 } from "./vst-diagnostics.mjs";
@@ -568,10 +569,16 @@ export function createBingXLiveApi({
   // A caller must explicitly inject and grant this capability. It defaults
   // closed; no environment variable or imported runtime state enables writes.
   writePermission = () => false,
+  // Leverage, margin mode and per-trade allocation of the VST automated LONG
+  // path. The owner's bot uses the default (isolated 10x, 1% of balance).
+  positionProfile = OWNER_POSITION_PROFILE,
 } = {}) {
   if (!Object.hasOwn(ORIGINS, environment)) {
     throw new TypeError('environment must be "mainnet" or "vst"');
   }
+  const PROFILE = normalizePositionProfile(positionProfile);
+  const PROFILE_LEVERAGE = PROFILE.leverage;
+  const PROFILE_MARGIN = PROFILE.marginMode;
   const stopTransferContext = new AsyncLocalStorage();
   const preparationReadContext = new AsyncLocalStorage();
   const preparationReadPaths = new Set([
@@ -1651,10 +1658,12 @@ export function createBingXLiveApi({
       return amount === 0 && (side === "BOTH" || side === "LONG" ||
         side === "SHORT" || side == null);
     });
-    const isolated = marginType === "ISOLATED";
+    // The automated LONG path verifies this worker's own margin mode/leverage.
+    const isolated = usesAutomatedLongPolicy
+      ? marginType === PROFILE_MARGIN : marginType === "ISOLATED";
     const leverageOk = leverage.longLeverage === 10 && leverage.shortLeverage === 10;
     const probeLeverageOk = leverage.longLeverage === 10 && leverage.shortLeverage === 75;
-    const automatedLongLeverageOk = leverage.longLeverage === 10 &&
+    const automatedLongLeverageOk = leverage.longLeverage === PROFILE_LEVERAGE &&
       Number.isFinite(leverage.shortLeverage) && leverage.shortLeverage > 0;
     const supportedMode = mode === "ONE_WAY" || mode === "HEDGE";
     let risk = null;
@@ -1665,6 +1674,8 @@ export function createBingXLiveApi({
       risk = assessStopRisk({
         quantity, entryPrice, stopLoss, filters, tiers, fees, funding,
         requiredInitialMargin: availableRequired,
+        ...(usesAutomatedLongPolicy
+          ? { leverageValue: PROFILE_LEVERAGE, marginMode: PROFILE_MARGIN } : {}),
       });
     }
     const plannedTopUpUsd = risk?.plannedTopUpUsd ?? 0;
@@ -1687,7 +1698,7 @@ export function createBingXLiveApi({
         }
         : usesAutomatedLongPolicy
           ? {
-            leverageLong10: leverage.longLeverage === 10,
+            leverageLong10: leverage.longLeverage === PROFILE_LEVERAGE,
             leverageShortIndependentlyVerified: automatedLongLeverageOk,
           }
           : { leverage10: leverageOk }),
@@ -1734,6 +1745,7 @@ export function createBingXLiveApi({
 
   function assessStopRisk({
     quantity, entryPrice, stopLoss, filters, tiers, fees, funding, requiredInitialMargin,
+    leverageValue = 10, marginMode = "ISOLATED",
   }) {
     const qtyText = floorQuantity(quantity, filters.quantityPrecision);
     const qty = positive(qtyText, "quantity");
@@ -1746,7 +1758,7 @@ export function createBingXLiveApi({
       throw new BingXLiveApiError("Order is below BingX contract minimums");
     }
     const notional = qty * entry;
-    const withinInitialNotionalLimit = notional <= requiredInitialMargin * 10;
+    const withinInitialNotionalLimit = notional <= requiredInitialMargin * leverageValue;
     const tier = tiers.find((item) => notional <= item.maxNotional);
     if (!tier) throw new BingXLiveApiError("Order notional exceeds every BingX risk tier");
 
@@ -1755,18 +1767,21 @@ export function createBingXLiveApi({
     const fundingReserve = Math.abs(funding.rate);
     const roundTripFeeReserve = fees.taker * 2;
     const liquidationPrice = entry * (
-      1 - 1 / 10 + tier.maintenanceMarginRate + roundTripFeeReserve + fundingReserve
+      1 - 1 / leverageValue + tier.maintenanceMarginRate + roundTripFeeReserve + fundingReserve
     );
     const buffer = Math.max(entry * 0.005, 10 ** -filters.pricePrecision);
     const requiredStop = liquidationPrice + buffer;
     const rawExtra = Math.max(0, (requiredStop - stop) * qty);
     // Round the planned top-up upward to cents, then add one cent to preserve
     // the strict stop > liquidation+buffer inequality despite rounding.
-    const plannedTopUpUsd = stop > requiredStop
+    // Cross margin: the account backs the position; there is no isolated
+    // position margin to top up and no per-position liquidation estimate.
+    const cross = marginMode === "CROSSED";
+    const plannedTopUpUsd = cross || stop > requiredStop
       ? 0
       : Math.ceil(rawExtra * 100) / 100 + 0.01;
     const fundedLiquidationPrice = liquidationPrice - plannedTopUpUsd / qty;
-    const protectionAfterTopUp = stop > fundedLiquidationPrice + buffer;
+    const protectionAfterTopUp = cross || stop > fundedLiquidationPrice + buffer;
     return {
       safe: false,
       protectionAfterTopUp,
@@ -1784,7 +1799,8 @@ export function createBingXLiveApi({
       takerFeeRate: fees.taker,
       roundTripFeeReserveRate: roundTripFeeReserve,
       fundingRate: funding.rate,
-      leverage: 10,
+      leverage: leverageValue,
+      ...(marginMode === "ISOLATED" ? {} : { marginMode }),
     };
   }
 
@@ -2083,14 +2099,14 @@ export function createBingXLiveApi({
       throw new BingXLiveApiError("VST entry requires exactly one total VST balance row");
     }
     const totalBalance = strictNumeric(vstRows[0].balance, "total VST balance");
-    const initialMarginBudget = totalBalance * 0.01;
+    const initialMarginBudget = allocationBudget(PROFILE, totalBalance);
     if (!Number.isFinite(initialMarginBudget) || initialMarginBudget <= 0) {
       throw new BingXLiveApiError("VST one-percent initial-margin budget is invalid");
     }
     let sizedQuantity = floorQuantity(quantity, filters.quantityPrecision);
     let qty = positive(sizedQuantity, "quantity");
     const notional = qty * positive(price, "maximum entry price");
-    if (refreshSizing === null && notional / 10 > initialMarginBudget) {
+    if (refreshSizing === null && notional / PROFILE_LEVERAGE > initialMarginBudget) {
       throw new BingXLiveApiError("VST entry exceeds one percent of the total VST balance");
     }
     if (approvedTopUpMargin !== null &&
@@ -2171,7 +2187,9 @@ export function createBingXLiveApi({
             preSignReason: "final_balance_invalid",
           });
         }
-        let latestBudget = strictNumeric(latestRows[0].balance, "final total VST balance") * 0.01;
+        let latestBudget = allocationBudget(
+          PROFILE, strictNumeric(latestRows[0].balance, "final total VST balance"),
+        );
         if (!Number.isFinite(latestBudget) || latestBudget <= 0) {
           throw new BingXLiveApiError("VST final one-percent initial-margin budget was exceeded", {
             preSignReason: "final_budget_exceeded",
@@ -2197,6 +2215,7 @@ export function createBingXLiveApi({
                 refreshedSizing = refreshVstEntrySizing({
                   ...snapshot, symbol: name.replace("-", ""), stopLoss,
                   policy: refreshSizing, quote, nowMs: Number(clock()),
+                  positionProfile: PROFILE,
                 });
                 refreshedFilters = snapshot.filters;
                 return refreshedSizing;
@@ -2256,7 +2275,7 @@ export function createBingXLiveApi({
             preSignReason: "final_quote_out_of_bounds",
           });
         }
-        if (qty * quote.ask / 10 > latestBudget) {
+        if (qty * quote.ask / PROFILE_LEVERAGE > latestBudget) {
           throw new BingXLiveApiError("VST final one-percent initial-margin budget was exceeded", {
             preSignReason: "final_budget_exceeded",
           });
@@ -3120,8 +3139,8 @@ export function createBingXLiveApi({
     if (environment !== "vst") {
       throw new BingXLiveApiError(`${label} is unavailable outside VST`);
     }
-    if (mode !== "HEDGE" || marginType !== "ISOLATED" ||
-        leverage.longLeverage !== 10 ||
+    if (mode !== "HEDGE" || marginType !== PROFILE_MARGIN ||
+        leverage.longLeverage !== PROFILE_LEVERAGE ||
         !Number.isFinite(leverage.shortLeverage) || leverage.shortLeverage <= 0) {
       throw new BingXLiveApiError(
         `${label} requires HEDGE isolated LONG 10x and independently verified SHORT leverage`,
@@ -3145,7 +3164,7 @@ export function createBingXLiveApi({
   function validateEmergencyVstLongExit({
     mode, marginType, positions, orders, name, positionId, quantity,
   }) {
-    if (mode !== "HEDGE" || marginType !== "ISOLATED") {
+    if (mode !== "HEDGE" || marginType !== PROFILE_MARGIN) {
       throw new BingXLiveApiError(
         "VST emergency LONG exit requires HEDGE mode and isolated margin",
       );
@@ -7236,6 +7255,9 @@ export function createBingXLiveApi({
         "VST margin top-up requires exact entry and position identities and a unique operation ID",
       );
     }
+    if (PROFILE_MARGIN !== "ISOLATED") {
+      throw new BingXLiveApiError("VST margin top-up exists only for isolated margin");
+    }
     const value = positive(amount, "margin amount");
     const [mode, marginType, leverage, positions, orders] = await Promise.all([
       getPositionMode(), getMarginType(symbol), getLeverage(symbol), getPositions(symbol),
@@ -7402,7 +7424,8 @@ export function createBingXLiveApi({
       getPositionMode(), getMarginType(symbol),
     ]);
     const leverage = expectedPositionId === undefined ? null : await getLeverage(symbol);
-    if (marginType !== "ISOLATED") {
+    const expectedExitMargin = automatedLongPolicy !== undefined ? PROFILE_MARGIN : "ISOLATED";
+    if (marginType !== expectedExitMargin) {
       throw new BingXLiveApiError("BingX exit requires exchange-verified isolated margin");
     }
     if (expectedPositionId !== undefined) {
@@ -7483,7 +7506,7 @@ export function createBingXLiveApi({
             "Verified VST close final position/settings check failed",
           );
         }
-        if (freshMode !== "HEDGE" || freshMarginType !== "ISOLATED" ||
+        if (freshMode !== "HEDGE" || freshMarginType !== expectedExitMargin ||
             freshActive.length !== 1 || freshActive[0].positionSide !== "LONG" ||
             compareDecimals(freshActive[0].positionAmt, size, "exit quantity") !== 0 ||
             orderIdentifier(
@@ -7600,7 +7623,7 @@ export function createBingXLiveApi({
     if (mode !== "HEDGE") {
       throw new BingXLiveApiError("VST LONG leverage preparation requires HEDGE mode");
     }
-    if (marginType !== "ISOLATED") {
+    if (marginType !== PROFILE_MARGIN) {
       throw new BingXLiveApiError("VST LONG leverage preparation requires isolated margin");
     }
     requireFlatSymbolFor(symbol, positions, name);
@@ -7608,21 +7631,21 @@ export function createBingXLiveApi({
       throw new BingXLiveApiError(`VST LONG leverage preparation requires no ${symbol} open orders`);
     }
     const originalShortLeverage = current.shortLeverage;
-    if (current.longLeverage === 10) {
+    if (current.longLeverage === PROFILE_LEVERAGE) {
       // Idempotent already-configured path: the GET above independently reads
       // both sides; no write is needed and the SHORT value remains untouched.
       return {
         symbol: name,
         positionMode: mode,
         marginType,
-        longLeverage: 10,
+        longLeverage: PROFILE_LEVERAGE,
         shortLeverage: originalShortLeverage,
         changed: false,
         verified: true,
       };
     }
     await request("POST", PATH.leverage, {
-      symbol: name, leverage: 10, side: "LONG",
+      symbol: name, leverage: PROFILE_LEVERAGE, side: "LONG",
     }, {
       beforeSign: async () => {
         const [freshPositions, freshOrders, freshMarginType, freshMode, freshLeverage] =
@@ -7630,7 +7653,7 @@ export function createBingXLiveApi({
             getPositions(symbol), getOpenOrders(symbol), getMarginType(symbol),
             getPositionMode(), getLeverage(symbol),
           ]);
-        if (freshMode !== "HEDGE" || freshMarginType !== "ISOLATED") {
+        if (freshMode !== "HEDGE" || freshMarginType !== PROFILE_MARGIN) {
           throw new BingXLiveApiError("VST LONG leverage final HEDGE/isolated check failed");
         }
         requireFlatSymbolFor(symbol, freshPositions, name);
@@ -7644,7 +7667,7 @@ export function createBingXLiveApi({
       },
     });
     const verified = await getLeverage(symbol);
-    if (verified.longLeverage !== 10 ||
+    if (verified.longLeverage !== PROFILE_LEVERAGE ||
         verified.shortLeverage !== originalShortLeverage) {
       throw new BingXLiveApiError(
         "VST LONG leverage write failed independent LONG/SHORT read-after-write verification",
@@ -7784,14 +7807,15 @@ export function createBingXLiveApi({
       );
     }
 
-    if (marginType === "CROSSED") {
+    // Target is this worker's margin mode (ISOLATED for the owner).
+    if (marginType !== PROFILE_MARGIN) {
       if (submittedVstIsolatedMarginSymbols.has(name)) {
         throw new BingXLiveApiError(
           `VST isolated-margin POST for ${name} was already submitted; reconcile read-only`,
         );
       }
       await request("POST", PATH.marginType, {
-        symbol: name, marginType: "ISOLATED",
+        symbol: name, marginType: PROFILE_MARGIN,
       }, {
         beforeSign: async () => {
           if (submittedVstIsolatedMarginSymbols.has(name)) {
@@ -7826,7 +7850,7 @@ export function createBingXLiveApi({
               `VST isolated-margin preparation requires no open orders for ${name}`,
             );
           }
-          if (freshMarginType !== "CROSSED") {
+          if (freshMarginType === PROFILE_MARGIN) {
             throw new BingXLiveApiError(
               `VST isolated-margin state for ${name} changed before submission`,
             );
@@ -7840,7 +7864,7 @@ export function createBingXLiveApi({
       await Promise.all([
         getPositionMode(), getMarginType(symbol), getPositions(), getOpenOrders(),
       ]);
-    if (verifiedMode !== "HEDGE" || verifiedMarginType !== "ISOLATED" ||
+    if (verifiedMode !== "HEDGE" || verifiedMarginType !== PROFILE_MARGIN ||
         !Array.isArray(finalPositions) || !Array.isArray(finalOrders) ||
         finalPositions.some((position) => position && typeof position === "object" &&
           position.symbol === name && validPositionAmount(position) !== 0) ||
@@ -7854,7 +7878,7 @@ export function createBingXLiveApi({
       symbol: name,
       priorMarginType: marginType,
       marginType: verifiedMarginType,
-      changed: marginType === "CROSSED",
+      changed: marginType !== PROFILE_MARGIN,
       positionMode: verifiedMode,
       positionsFlat: true,
       openOrdersEmpty: true,
@@ -8019,6 +8043,7 @@ export function createBingXLiveApi({
     setVstLongLeverage10,
     setVstLeverage,
     setVstIsolatedMarginForFlatSymbol,
+    positionProfile: PROFILE,
     cancelVstOrder,
   }, environment));
 }

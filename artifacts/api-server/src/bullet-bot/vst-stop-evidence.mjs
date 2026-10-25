@@ -199,7 +199,7 @@ export function buildVstPositionCheckEvidence(checks) {
     if (kind === "symbol") return symbol(value);
     if (kind === "boolean") return typeof value === "boolean" ? value : undefined;
     if (kind === "side") return ["Buy", "Sell"].includes(value) ? value : undefined;
-    return ["ISOLATED", "CROSS"].includes(value) ? value : undefined;
+    return ["ISOLATED", "CROSS", "CROSSED"].includes(value) ? value : undefined;
   };
   const observations = [];
   for (const [label, kind] of Object.entries(labels)) {
