@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createCoalescedPriceRead } from "./coalesced-price-read.mjs";
+import { createVstEndpointPacer } from "./vst-endpoint-pacer.mjs";
 import { refreshVstEntrySizing } from "./vst-fresh-entry-sizing.mjs";
 import { OWNER_POSITION_PROFILE, allocationBudget, normalizePositionProfile } from "./vst-position-profile.mjs";
 import {
@@ -189,9 +190,7 @@ export function createBingXOutboundPacer({
 
 // All default VST clients in this process share a single outbound budget.
 // Tests inject their own fake-clock pacer to keep test state isolated.
-const defaultVstOutboundPacer = createBingXOutboundPacer({
-  gapMs: VST_REQUEST_GAP_MS,
-});
+const defaultVstOutboundPacer = createVstEndpointPacer();
 
 function rateLimitJitter(random) {
   let sample;
@@ -970,6 +969,7 @@ export function createBingXLiveApi({
       let signature;
       try {
       await outboundPacer.waitForSlot({
+        method, endpoint: path,
         priority: environment === "vst" && write && beforeSignCompletedAt !== undefined,
       });
       if (environment === "vst" && beforeSignCompletedAt !== undefined) {
