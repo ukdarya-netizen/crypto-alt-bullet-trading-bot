@@ -1,5 +1,6 @@
 // An explicitly owner-approved, one-position VST probe. Never used by the
 // normal worker. The durable journal is required before every exchange write.
+import { setTimeout as wait } from "node:timers/promises";
 const SYMBOL = "BTCUSDT";
 const NATIVE = "BTC-USDT";
 const active = (rows) => rows.filter((row) => Number(row.positionAmt) !== 0);
@@ -25,7 +26,7 @@ function sameOrder(row, id, type, quantity, price) {
 
 export async function runControlledVstBracketProbe({
   api, submitTake, cancelProtective, save, state = null, clock = Date.now,
-  makeId, closePolicy,
+  makeId, closePolicy, readDelay = () => wait(300),
 }) {
   if (typeof save !== "function") throw Error("probe_requires_durable_journal");
   if (state !== null && (state.version !== 1 || state.symbol !== SYMBOL ||
@@ -33,7 +34,10 @@ export async function runControlledVstBracketProbe({
       !/^vbp_[a-z0-9]+$/.test(state.closeClientId ?? ""))) {
     throw Error("invalid_probe_journal");
   }
-  if (state?.finished) return state;
+  if (state?.finished) {
+    if (state.phase !== "completed") throw Error(state.failure ?? "probe_did_not_pass");
+    return state;
+  }
   const record = async (fields) => {
     state = { ...state, ...fields, updatedAt: new Date(clock()).toISOString() };
     await save(state);
@@ -148,6 +152,7 @@ export async function runControlledVstBracketProbe({
   }
   let failure;
   try {
+    if (!state.closeAttempted) {
     const position = await readPosition();
     if (!position) throw Error("probe_position_already_flat");
     await record({ positionId: positionId(position), entryOrderId: entryId,
@@ -179,22 +184,44 @@ export async function runControlledVstBracketProbe({
       await record({ takeOrderId: orderId(result) });
     }
     if (!state.takeOrderId) throw Error("probe_take_submission_unknown_no_replay");
-    const [orders, stop, take, current] = await Promise.all([
-      api.getOpenOrders(SYMBOL),
-      api.queryOrder(SYMBOL, { orderId: state.stopOrderId }),
-      api.queryOrder(SYMBOL, { orderId: state.takeOrderId }), readPosition(),
-    ]);
-    if (!current || orders.length !== 2 ||
-        !sameOrder(stop, state.stopOrderId, "STOP_MARKET", state.quantity, state.stopLoss) ||
-        !sameOrder(take, state.takeOrderId, "TAKE_PROFIT_MARKET", state.quantity, state.takePrice) ||
-        !orders.some((row) => sameOrder(row, state.stopOrderId, "STOP_MARKET",
-          state.quantity, state.stopLoss)) ||
-        !orders.some((row) => sameOrder(row, state.takeOrderId, "TAKE_PROFIT_MARKET",
-          state.quantity, state.takePrice))) {
-      throw Error("probe_dual_orders_not_independently_verified");
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const [orders, stop, take, current] = await Promise.all([
+        api.getOpenOrders(SYMBOL),
+        api.queryOrder(SYMBOL, { orderId: state.stopOrderId }),
+        api.queryOrder(SYMBOL, { orderId: state.takeOrderId }), readPosition(),
+      ]);
+      const matches = (...args) => {
+        try { return sameOrder(...args); } catch { return false; }
+      };
+      const checks = {
+        position: Boolean(current),
+        count: orders.length === 2,
+        stopQuery: matches(stop, state.stopOrderId, "STOP_MARKET", state.quantity, state.stopLoss),
+        takeQuery: matches(take, state.takeOrderId, "TAKE_PROFIT_MARKET", state.quantity, state.takePrice),
+        stopOpen: orders.some((row) => matches(row, state.stopOrderId, "STOP_MARKET",
+          state.quantity, state.stopLoss)),
+        takeOpen: orders.some((row) => matches(row, state.takeOrderId, "TAKE_PROFIT_MARKET",
+          state.quantity, state.takePrice)),
+        noForeign: orders.every((row) => [state.stopOrderId, state.takeOrderId].includes(orderId(row))),
+      };
+      // Persist both actual response cohorts before deciding; a later closed
+      // history row cannot reconstruct a failed active-order observation.
+      await record({ verificationReads: [...(state.verificationReads ?? []), {
+        at: new Date(clock()).toISOString(), attempt, checks, orders, stop, take,
+        position: current && { id: positionId(current), quantity: current.positionAmt },
+      }] });
+      if (Object.values(checks).every(Boolean)) {
+        await record({ phase: "dual_orders_verified", stop, take,
+          dualVerifiedAt: new Date(clock()).toISOString() });
+        break;
+      }
+      if (!checks.position || !checks.stopQuery || !checks.stopOpen || !checks.noForeign ||
+          attempt === 2) throw Error("probe_dual_orders_not_independently_verified");
+      // Only bounded GET confirmation while the original SL stays proven.
+      // Never resubmit an order or widen a quantity/price/identity check.
+      await readDelay();
     }
-    await record({ phase: "dual_orders_verified", stop, take,
-      dualVerifiedAt: new Date(clock()).toISOString() });
+    }
   } catch (error) {
     failure = error;
     await record({ failure: error.message });
@@ -223,12 +250,14 @@ export async function runControlledVstBracketProbe({
       const id = orderId(row);
       const known = id === state.stopOrderId || id === state.takeOrderId;
       if (!known) throw Error("probe_foreign_or_unattributed_order_not_cancelled");
+      const type = id === state.stopOrderId ? "STOP_MARKET" : "TAKE_PROFIT_MARKET";
+      const price = id === state.stopOrderId ? state.stopLoss : state.takePrice;
       if (state.cancelAttempted?.includes(id)) throw Error("probe_cancel_unknown_no_replay");
       await record({ cancelAttempted: [...(state.cancelAttempted ?? []), id] });
       const guard = async () => {
         if (await readPosition()) throw Error("probe_cancel_requires_flat");
         const fresh = await api.queryOrder(SYMBOL, { orderId: id });
-        if (!sameOrder(fresh, id, row.type, state.quantity, row.stopPrice)) {
+        if (!sameOrder(fresh, id, type, state.quantity, price)) {
           throw Error("probe_cancel_order_changed");
         }
       };

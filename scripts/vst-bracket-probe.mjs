@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createBingXLiveApi } from "../artifacts/api-server/src/bullet-bot/bingx-live-api.mjs";
@@ -30,7 +30,7 @@ export async function main() {
     environment: "vst", requestPacer: createVstEndpointPacer(),
     writePermission: ({ method, path }) => method !== "GET" &&
       ["/openApi/swap/v2/trade/order", "/openApi/swap/v2/trade/leverage"].includes(path),
-    fetchImpl: (raw, options) => {
+    fetchImpl: async (raw, options) => {
       const url = new URL(raw);
       const method = options?.method ?? "GET";
       if (url.origin !== "https://open-api-vst.bingx.com") throw Error("VST_host_only");
@@ -46,7 +46,18 @@ export async function main() {
           at: new Date().toISOString() });
         console.log(JSON.stringify({ event: "probe_transport", ...starts.at(-1) }));
       }
-      return fetch(raw, options);
+      const response = await fetch(raw, options);
+      if (url.searchParams.get("symbol") === "BTC-USDT" &&
+          ["/openApi/swap/v2/trade/order", "/openApi/swap/v2/trade/openOrders"]
+            .includes(url.pathname)) {
+        // Only BTC order responses, never credentials, request signatures,
+        // account balances or position/account identity payloads.
+        await appendFile(`${path}.responses.ndjson`, JSON.stringify({
+          at: new Date().toISOString(), method, path: url.pathname,
+          httpStatus: response.status, body: await response.clone().text(),
+        }) + "\n", { mode: 0o600 });
+      }
+      return response;
     },
   });
   const result = await api.runControlledVstBracketProbe({

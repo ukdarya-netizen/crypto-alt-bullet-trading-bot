@@ -4,18 +4,25 @@ import { runControlledVstBracketProbe } from "../vst-bracket-probe.mjs";
 import { createBingXLiveApi } from "../bingx-live-api.mjs";
 
 function fixture({ entryAmbiguous = false, takeAmbiguous = false,
-  closeAmbiguous = false, occupied = false, saveFails = false } = {}) {
+  closeAmbiguous = false, occupied = false, saveFails = false, takeDelayed = false } = {}) {
   const rows = new Map();
   const journal = [];
   const calls = [];
   let position = occupied ? { positionId: "999", positionSide: "LONG", positionAmt: "1" } : null;
   let serial = 0;
   let takeQuantity;
+  let delayedRead = false;
   const api = {
     contract: async () => ({ pricePrecision: 2, quantityPrecision: 3,
       minQuantity: 0.001, minNotional: 2 }),
     getPositions: async () => position ? [structuredClone(position)] : [],
-    getOpenOrders: async () => [...rows.values()].filter((row) => row.status === "NEW"),
+    getOpenOrders: async () => [...rows.values()].filter((row) => {
+      if (row.orderId === "102" && takeDelayed && !delayedRead) {
+        delayedRead = true;
+        return false;
+      }
+      return row.status === "NEW";
+    }),
     getPositionMode: async () => "HEDGE",
     getMarginType: async () => "ISOLATED",
     getLeverage: async () => ({ longLeverage: 10 }),
@@ -49,7 +56,7 @@ function fixture({ entryAmbiguous = false, takeAmbiguous = false,
     },
   };
   const args = {
-    api, clock: () => 1000, makeId: () => `vbp_test${++serial}`,
+    api, clock: () => 1000, makeId: () => `vbp_test${++serial}`, readDelay: async () => {},
     save: async (state) => {
       if (saveFails) throw Error("journal_unavailable");
       journal.push(structuredClone(state));
@@ -96,6 +103,26 @@ test("VST bracket probe recovers ambiguous entry and close acknowledgements with
   assert.equal(result.phase, "completed");
   assert.equal(f.calls.filter((call) => call === "entry").length, 1);
   assert.equal(f.calls.filter((call) => call === "close").length, 1);
+});
+
+test("VST bracket probe confirms delayed TP visibility using only reads, retaining the original SL", async () => {
+  const f = fixture({ takeDelayed: true });
+  const result = await runControlledVstBracketProbe(f.args);
+  assert.equal(result.phase, "completed");
+  assert.equal(result.verificationReads.length, 2);
+  assert.equal(result.verificationReads[0].checks.takeOpen, false);
+  assert.equal(result.verificationReads[0].checks.stopOpen, true);
+  assert.equal(f.calls.filter((call) => call === "take").length, 1);
+});
+
+test("a safely closed but failed probe can never become a successful result on recovery", async () => {
+  const f = fixture();
+  await assert.rejects(runControlledVstBracketProbe({
+    ...f.args, state: { version: 1, symbol: "BTCUSDT", entryClientId: "vbp_test1",
+      closeClientId: "vbp_test2", finished: true, phase: "closed_after_failure",
+      failure: "dual_order_proof_failed" },
+  }), /dual_order_proof_failed/);
+  assert.equal(f.calls.length, 0);
 });
 
 test("VST bracket probe closes after ambiguous TP POST, never retries or cancels an unattributed order", async () => {
