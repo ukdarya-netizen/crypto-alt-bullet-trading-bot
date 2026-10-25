@@ -583,10 +583,15 @@ export function createVstBroker({
   fillArchiveStore,
 }) {
   const nativeApi = api;
+  let nativeEvidenceStore = fillArchiveStore;
   // Explicit stop-proof view, not a filtered public exchange API. It excludes
   // only exact acknowledged and journalled takes verified on this native read.
   if (typeof api?.getProtectionOrders === "function")
-    api = { ...api, getOpenOrders: api.getProtectionOrders };
+    api = { ...api, getOpenOrders: async (symbol) => {
+      if (nativeApi.nativeFullTake && typeof nativeEvidenceStore?.listNativeTakeIntents === "function")
+        nativeApi.nativeFullTake.restore(await nativeEvidenceStore.listNativeTakeIntents());
+      return nativeApi.getProtectionOrders(symbol);
+    } };
   if (!api || typeof api.getVstMarkPrice !== "function" ||
       typeof api.placeVstAutomatedLong !== "function" ||
       typeof api.upgradeVstLongStop !== "function" ||
@@ -10700,10 +10705,13 @@ export function createVstBroker({
 
   return Object.freeze({
     ...(nativeApi.nativeFullTake ? {
-      createNativeTakeProfitManager: (store) => createNativeTakeManager({
-        api: nativeApi, store, clock,
-        proveFill: (binding, stops) => proveNativeTakeFill(nativeApi, binding, stops, Number(clock())),
-      }),
+      createNativeTakeProfitManager: (store) => {
+        nativeEvidenceStore = store;
+        return createNativeTakeManager({
+          api: nativeApi, store, clock,
+          proveFill: (binding, stops) => proveNativeTakeFill(nativeApi, binding, stops, Number(clock())),
+        });
+      },
     } : {}),
     positionProfile: PROFILE,
     proveEntryNotExecuted,

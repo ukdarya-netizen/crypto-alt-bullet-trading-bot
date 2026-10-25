@@ -92,7 +92,11 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
         !positive(binding.takePrice) || !/^[1-9]\d*$/.test(binding.positionId) ||
         !/^[1-9]\d*$/.test(binding.entryOrderId) || binding.workingType !== "CONTRACT_PRICE")
       throw new Error("native_take_binding_invalid");
-    bindings.set(binding.clientOrderId, { ...binding });
+    const previous = bindings.get(binding.clientOrderId);
+    if (previous?.orderId && binding.orderId && previous.orderId !== binding.orderId)
+      throw new Error("native_take_binding_identity_conflict");
+    bindings.set(binding.clientOrderId, { ...binding,
+      ...(previous?.orderId && !binding.orderId ? { orderId: previous.orderId } : {}) });
   }
   function remove(binding) { bindings.delete(binding.clientOrderId); }
   function guardOrders(rows) {
@@ -161,8 +165,16 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
     register(submitted);
     return submitted;
   }
-  async function inspect(binding) {
+  async function inspect(binding, snapshot = null) {
     assertVst();
+    if (snapshot && binding.orderId) {
+      const positions = positionRows(snapshot.positions, binding);
+      const orders = snapshot.orders.filter((r) => r.symbol === nativeSymbol(binding.symbol));
+      if (positions.length === 1 && equal(positions[0].positionAmt, binding.quantity) &&
+          orders.filter((r) => nativeTakeOpenMatches(r, binding)).length === 1)
+        return { binding, positions, orders, queried: null, active: true,
+          triggerBasisVerified: false };
+    }
     const [positions, orders, queried] = await Promise.all([
       readPositions(binding.symbol), readOrders(binding.symbol),
       queryOrder(binding.symbol, binding.orderId
@@ -220,6 +232,23 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
     return queried;
   }
   return Object.freeze({ register, remove, guardOrders, create, inspect, cancelWhenFlat,
+    restore(intents) {
+      const active = new Set(intents.map((i) => i.clientOrderId));
+      for (const key of bindings.keys()) if (!active.has(key)) bindings.delete(key);
+      for (const intent of intents) {
+        if (intent.request?.binding &&
+            (intent.exchangeOrderId || intent.state !== "prepared"))
+          register({ ...intent.request.binding,
+            ...(intent.exchangeOrderId ? { orderId: intent.exchangeOrderId } : {}) });
+      }
+    },
+    async readAccount() {
+      assertVst();
+      const [positions, orders] = await Promise.all([readPositions(), readOrders()]);
+      if (!Array.isArray(positions) || !Array.isArray(orders))
+        throw new Error("native_take_account_cohort_invalid");
+      return { positions, orders };
+    },
     plan: async (symbol, entryPrice) => nativeTakePrice(entryPrice, (await contract(symbol)).pricePrecision),
     async hasPosition(binding) {
       const rows = positionRows(await readPositions(binding.symbol), binding);
@@ -241,7 +270,7 @@ export async function proveNativeTakeFill(api, binding, knownStops, now = Date.n
       api.getPositions(binding.symbol), api.getOpenOrders(binding.symbol),
       api.queryFills(binding.symbol, {
         startTs: Math.max(1, binding.createdAt - 60_000, now - 86_400_000),
-        endTs: now, currency: "VST", requireComplete: true,
+        endTs: now, currency: "USDT", requireComplete: true,
       }),
     ]);
     if (!parent || parent.status !== "FILLED" || parent.symbol !== nativeSymbol(binding.symbol) ||
@@ -396,13 +425,15 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
       }, clientOrderId);
     } catch (error) { await report(record.sourceSignalId, error); }
   }
-  async function reconcile(intent) {
+  async function reconcile(intent, snapshot) {
     blocked.delete(intent.sourceSignalId);
     let binding = { ...intent.request.binding,
       ...(intent.exchangeOrderId ? { orderId: intent.exchangeOrderId } : {}) };
     if (intent.state !== "prepared" || binding.orderId) native.register(binding);
+    if (intent.state === "prepared" &&
+        await store.hasPendingSourceExitRequest?.(intent.sourceSignalId)) return;
     const record = await store.getNativeTakePosition(intent.sourceSignalId);
-    const observation = await native.inspect(binding);
+    const observation = await native.inspect(binding, snapshot);
     binding = observation.binding;
     if (binding.orderId && binding.orderId !== intent.exchangeOrderId) {
       await store.markIntent(intent.clientOrderId, "submitted", {
@@ -503,13 +534,12 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     blocksPosition: (sourceSignalId) => blocked.has(sourceSignalId),
     async sweep() {
       const intents = await store.listNativeTakeIntents();
+      native.restore(intents);
+      // A fresh account cohort covers all resting takes. Initial proof,
+      // missing orders and closures still require exact-ID/native-fill reads.
+      const snapshot = intents.length ? await native.readAccount() : null;
       for (const intent of intents) {
-        if (intent.exchangeOrderId) native.register({
-          ...intent.request.binding, orderId: intent.exchangeOrderId,
-        });
-      }
-      for (const intent of intents) {
-        try { await reconcile(intent); }
+        try { await reconcile(intent, snapshot); }
         catch (error) { blocked.add(intent.sourceSignalId); await report(intent.sourceSignalId, error); }
       }
       for (const record of await store.listOpenPositions()) {

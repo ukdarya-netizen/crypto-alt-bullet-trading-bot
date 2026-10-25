@@ -231,7 +231,11 @@ function fillFixture() {
     : { orderId: "401", symbol: "BTC-USDT", status: "FILLED", type: "TAKE_PROFIT_MARKET",
       side: "SELL", positionSide: "LONG", executedQty: "2" },
     getPositions: async () => [], getOpenOrders: async () => [stop()],
-    queryFills: async (_s, opts) => { assert.equal(opts.requireComplete, true); return fills; } };
+    queryFills: async (_s, opts) => {
+      assert.equal(opts.requireComplete, true);
+      assert.equal(opts.currency, "USDT", "history uses the quote contract, not the demo wallet asset");
+      return fills;
+    } };
   return { api, binding, fills };
 }
 
