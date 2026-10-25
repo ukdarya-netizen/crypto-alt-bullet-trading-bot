@@ -191,6 +191,17 @@ test("a non-scalp position never acquires a +5% native take from new worker defa
   assert.equal(f.intents.length, 0);
 });
 
+test("an unknown pinned strategy version cannot place a native take", async () => {
+  const f = fixture();
+  f.record.snapshot.executionStrategy = {
+    version: 2, exitStrategy: "full_take_5pct", strategyAuthority: "source",
+  };
+  const manager = createNativeTakeManager({ api: f.api, store: f.store,
+    proveFill: async () => ({ verified: false }), clock: () => now });
+  await assert.rejects(manager.ensure(f.record), /Unsupported position strategy version/);
+  assert.equal(f.state.posts, 0);
+});
+
 test("a previously pinned +5% position retains its native take with non-scalp worker defaults", async () => {
   const f = fixture();
   f.record.snapshot.executionStrategy = {

@@ -393,6 +393,8 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
   }
   async function ensure(record) {
     const state = record.snapshot ?? record;
+    if (state.executionStrategy && state.executionStrategy.version !== 1)
+      throw new TypeError("Unsupported position strategy version");
     if ((state.executionStrategy?.exitStrategy ?? legacyExitStrategy) !== "full_take_5pct") return;
     if (record.status !== "open" || state.environment !== "vst" || Number(state.leverage) !== 10 ||
         !positive(state.remainingQty) || !state.exchangePositionId || !state.entryOrderId ||
