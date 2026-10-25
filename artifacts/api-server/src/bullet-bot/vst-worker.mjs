@@ -1486,9 +1486,9 @@ export function createVstWorker({
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
   const profileMarginIs = (value) => marginModeIs(value, PROFILE);
-  async function urgentWorkPending() {
+  async function urgentWorkPending(entryPhase = false) {
     if (typeof shouldYieldToUrgentWork !== "function") return false;
-    try { return await shouldYieldToUrgentWork() === true; }
+    try { return await shouldYieldToUrgentWork({ entryPhase }) === true; }
     catch { return true; }
   }
   const urgentYield = () => ({ kind: "waiting", reason: "priority_work_queued" });
@@ -6935,7 +6935,7 @@ export function createVstWorker({
     row, capabilities, readCapabilities = null, planningInputHint = null,
     batchExecution = false, batchBudget = null,
   ) {
-    if (await urgentWorkPending()) return urgentYield();
+    if (await urgentWorkPending(true)) return urgentYield();
     let signal = row.body;
     const entryBlock = typeof signal?.sourceSignalId === "string" && entryGuard
       ? await entryGuard(signal.sourceSignalId) : false;
@@ -7135,7 +7135,7 @@ export function createVstWorker({
       }
 
       if (marginPreparationRequired) {
-        if (await urgentWorkPending()) return urgentYield();
+        if (await urgentWorkPending(true)) return urgentYield();
         const request = {
           operation: "prepare_margin_mode",
           accountId: capabilities.accountId,
@@ -7214,7 +7214,7 @@ export function createVstWorker({
         return { kind: "prepared", reason: "isolated_margin_mode_confirmed" };
       }
 
-      if (await urgentWorkPending()) return urgentYield();
+      if (await urgentWorkPending(true)) return urgentYield();
       const leverageRequest = {
         operation: "set_isolated_leverage",
         accountId: capabilities.accountId,
@@ -7255,7 +7255,7 @@ export function createVstWorker({
         return { kind: "prepared", reason: "isolated_leverage_confirmed" };
       }
 
-      if (await urgentWorkPending()) return urgentYield();
+      if (await urgentWorkPending(true)) return urgentYield();
       const request = {
         operation: "entry",
         entryOrderType: "MARKET",
@@ -15196,7 +15196,7 @@ export function createVstWorker({
               return { input: await broker.readPlanningInputs(signal) };
             },
             execute: async (candidate, planningHint, planningError) => {
-              if (await urgentWorkPending()) {
+              if (await urgentWorkPending(true)) {
                 return { ...urgentYield(), batchStop: true };
               }
               if (planningError) {

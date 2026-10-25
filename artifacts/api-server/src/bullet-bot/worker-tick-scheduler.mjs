@@ -19,6 +19,7 @@ export function createIndependentWorkerTickScheduler({
     }
   };
   let vstWakePending = false;
+  let vstUrgentWakePending = false;
   let scheduleVstWake = () => {};
 
   const schedule = (tick) => {
@@ -31,6 +32,7 @@ export function createIndependentWorkerTickScheduler({
     const runVstTick = async () => {
       if (stopped || vstBusy) return;
       vstWakePending = false;
+      vstUrgentWakePending = false;
       vstBusy = true;
       try {
         vstTickWatchdog?.begin();
@@ -48,8 +50,10 @@ export function createIndependentWorkerTickScheduler({
       }
       if (!stopped && vstWakePending) void runVstTick();
     };
-    scheduleVstWake = () => {
-      if (stopped || vstWakePending) return;
+    scheduleVstWake = ({ urgent = true } = {}) => {
+      if (stopped) return;
+      if (urgent) vstUrgentWakePending = true;
+      if (vstWakePending) return;
       vstWakePending = true;
       if (!vstBusy) {
         // Coalesce multiple enqueue notifications into one immediate tick.
@@ -85,19 +89,21 @@ export function createIndependentWorkerTickScheduler({
     if (stopped) return;
     stopped = true;
     vstWakePending = false;
+    vstUrgentWakePending = false;
     for (const handle of timers) clearIntervalFn(handle);
   };
   // The returned function remains the historical stop handle; the additional
   // method lets durable source-exit enqueues wake this same single-flight VST
   // worker without creating a parallel runner.
-  stop.wakeVst = () => {
+  stop.wakeVst = (options) => {
     if (stopped || typeof runVst !== "function") return false;
-    scheduleVstWake();
+    scheduleVstWake(options);
     return true;
   };
   // A wake is a scheduling hint, never permission for another concurrent
   // exchange writer. The active tick can yield at a read-only boundary.
-  stop.hasPendingVstWake = () => !stopped && vstWakePending;
+  stop.hasPendingVstWake = ({ urgentOnly = false } = {}) =>
+    !stopped && (urgentOnly ? vstUrgentWakePending : vstWakePending);
   stop.drain = async () => {
     stop();
     if (vstBusy || paperBusy) {

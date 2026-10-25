@@ -181,7 +181,7 @@ export function botRequestHandler(req, res) {
     onIngress: (event) => {
       process.stdout.write(`Bullet signal ingress: ${JSON.stringify(event)}\n`);
       if (["accepted", "both_received", "partial_dual_write"].includes(event.outcome) &&
-          event.duplicate !== true) workerTickScheduler?.wakeVst?.();
+          event.duplicate !== true) workerTickScheduler?.wakeVst?.({ urgent: false });
     },
     basePath: "/api/bot",
     ingestAliases: ["/api/trading/signals"],
@@ -382,7 +382,8 @@ export async function startBotWorker() {
           process.stdout.write(`Bullet VST stage timing: ${JSON.stringify(timing)}\n`);
         },
         entryGuard: id => commandInbox.isEntryBlocked(id, "vst"),
-        shouldYieldToUrgentWork: () => workerTickScheduler?.hasPendingVstWake?.() === true,
+        shouldYieldToUrgentWork: ({ entryPhase } = {}) =>
+          workerTickScheduler?.hasPendingVstWake?.({ urgentOnly: entryPhase === true }) === true,
       })
     : null;
   paperWorker = paperActive

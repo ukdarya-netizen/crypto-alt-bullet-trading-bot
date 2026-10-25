@@ -115,3 +115,26 @@ test("a VST wake remains pending through a periodic busy tick and stop makes it 
   await intervals[0].callback();
   assert.equal(calls, 2);
 });
+
+test("new entries wake ordinary work without starving an active entry; a take/cancel upgrades the wake", async () => {
+  const intervals = [];
+  const gate = deferred();
+  let calls = 0;
+  const stop = createIndependentWorkerTickScheduler({
+    async runVst() { if (++calls === 1) await gate.promise; },
+    setIntervalFn(callback) { intervals.push(callback); return {}; },
+    clearIntervalFn() {},
+  });
+  const first = intervals[0]();
+  await Promise.resolve();
+  stop.wakeVst({ urgent: false });
+  assert.equal(stop.hasPendingVstWake(), true);
+  assert.equal(stop.hasPendingVstWake({ urgentOnly: true }), false);
+  stop.wakeVst();
+  assert.equal(stop.hasPendingVstWake({ urgentOnly: true }), true);
+  gate.resolve();
+  await first;
+  assert.equal(calls, 2);
+  assert.equal(stop.hasPendingVstWake(), false);
+  stop();
+});
