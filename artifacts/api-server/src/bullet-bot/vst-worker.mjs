@@ -8277,8 +8277,8 @@ export function createVstWorker({
     }
     const leg = candidates[0];
     const otherLeg = leg === "core" ? "runner" : "core";
-    const stop = state.split[`${leg}Stop`];
-    const otherStop = state.split[`${otherLeg}Stop`];
+    const stop = state.split?.[`${leg}Stop`];
+    const otherStop = state.split?.[`${otherLeg}Stop`];
     if (!validObject(stop) || typeof stop.orderId !== "string" ||
         !Number.isSafeInteger(state.split.createdAt) ||
         !Number.isFinite(Number(stop.quantity)) || Number(stop.quantity) <= 0 ||
@@ -11411,7 +11411,10 @@ export function createVstWorker({
         if (!state[`${leg}Open`]) continue;
         if (reusedAccountSnapshotAt !== null &&
             !reusedAccountSnapshotIsCurrent) continue;
-        const raw = exactRawSplitStop(state, accountState, state.split[`${leg}Stop`]);
+        // An impulse position may have no split at all (entered as a single
+        // core leg, runner never opened: IDUSDT 2026-10-25). Its stop is then
+        // proven by the regular protective-stop read, not a split stop.
+        const raw = exactRawSplitStop(state, accountState, state.split?.[`${leg}Stop`]);
         if (raw) exchangeStops[leg] = raw;
       }
     }
@@ -11908,9 +11911,9 @@ export function createVstWorker({
       const residualQuantity = Number(state.split?.[`${retainedLeg}Quantity`]);
       const quantityTolerance = Math.max(1e-10, Number(state.quantity) * 1e-8);
       if (!["close_core", "close_runner"].includes(action.type) ||
-          state.split.stage !== "complete" ||
+          state.split?.stage !== "complete" ||
           !state.coreOpen || !state.runnerOpen ||
-          !state.split.coreStop || !state.split.runnerStop ||
+          !state.split?.coreStop || !state.split?.runnerStop ||
           !Number.isFinite(residualQuantity) || residualQuantity <= 0 ||
           residualQuantity >= previousQuantity ||
           Math.abs(Number(nextPolicy.remainingQty) - residualQuantity) > quantityTolerance ||

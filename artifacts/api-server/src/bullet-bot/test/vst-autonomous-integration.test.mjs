@@ -5777,3 +5777,17 @@ test("a position whose management throws the same local error every tick is quar
   assert.equal(quarantined[0][2].symbol, SYMBOL);
   assert.equal(store.data.positions[0].status === "closed", false, "nothing was closed or changed");
 });
+
+test("an impulse position without a split object (single core leg) is managed without a TypeError", async () => {
+  const { store, exchange } = await completeSplitFixture();
+  exchange.setMarkPrice("101");
+  const snapshot = store.data.positions[0].snapshot;
+  delete snapshot.split;
+  snapshot.runnerOpen = false;
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  const worker = createVstWorker({ store, broker, clock: () => NOW,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  for (let i = 0; i < 2; i++) {
+    await assert.doesNotReject(worker.tick(), /coreStop/);
+  }
+});
