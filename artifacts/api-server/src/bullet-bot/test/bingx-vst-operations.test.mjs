@@ -1187,6 +1187,25 @@ test("bounded BTC bracket probe uses explicit LONG10 SHORT75 policy without rela
   assert.equal(oversized.calls.some(({ options }) => options.method === "POST"), false);
 });
 
+test("bounded entry accepts BingX nested acknowledgement and rejects conflicting IDs without replay", async () => {
+  for (const conflict of [false, true]) {
+    const f = fixture({ longLeverage: 10, shortLeverage: 10,
+      responseOverrides: [{ path: orderPath, method: "POST", response: { data: {
+        ...(conflict ? { orderId: "999" } : {}),
+        order: { orderId: "2114291121333993473", orderID: "2114291121333993473" },
+      } } }],
+    });
+    const request = {
+      symbol: "BTCUSDT", quantity: "0.001", maxPrice: "65300.0",
+      stopLoss: "64000.0", clientOrderId: `nested-bounded-${conflict}`,
+    };
+    if (conflict) await assert.rejects(f.api.placeVstBoundedLong(request), /conflicting/);
+    else await f.api.placeVstBoundedLong(request);
+    await assert.rejects(f.api.placeVstBoundedLong(request), /already submitted/);
+    assert.equal(f.calls.filter(({ options }) => options.method === "POST").length, 1);
+  }
+});
+
 test("bounded VST entry rejects unsafe state, >100 notional, mainnet, and wrong symbol", async () => {
   for (const options of [
     { marginType: "CROSSED" },
