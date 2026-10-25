@@ -3319,6 +3319,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
       recoverFailedMarginTopUp = false,
       expectedPositionSnapshot = null,
       expectedPositionUpdatedAt = null,
+      retireNativeTakeSiblings = false,
     }) {
       const signalId = requireString(sourceSignalId, "sourceSignalId");
       const orderId = requireString(clientOrderId, "clientOrderId");
@@ -3395,6 +3396,15 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
         const intent = intentFromRow(locked.rows[0]);
         const row = locked.rows[0];
         if (!intent || !row) throw new Error("VST verified intent was not found");
+        if (retireNativeTakeSiblings &&
+            (intent.request?.operation !== "native_full_take" ||
+             outcome?.verified !== true || outcome?.status !== "filled" ||
+             position.status !== "closed" || Number(position.remainingQty) !== 0 ||
+             position.nativeTake?.orderId !== intent.exchangeOrderId ||
+             outcome.fill?.triggerOrderId !== intent.exchangeOrderId ||
+             expectedPositionSnapshot === null)) {
+          throw new Error("Native take closure requires exact submitted-order and position proof");
+        }
         if (intent.sourceSignalId !== signalId || row.signal_source_signal_id !== signalId) {
           throw new Error("VST verified intent source signal mismatch");
         }
@@ -3570,6 +3580,18 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
            RETURNING source_signal_id, body, body_hash, status, reason, received_at, updated_at`,
           [signalId, signalStatus],
         );
+        if (retireNativeTakeSiblings) {
+          await client.query(
+            `UPDATE vst_order_intents SET state = 'failed',
+               outcome = outcome || $3::jsonb, updated_at = now()
+             WHERE source_signal_id = $1 AND client_order_id <> $2
+               AND state IN ('prepared', 'submitted', 'unknown')`,
+            [signalId, orderId, serialize({
+              reason: "position_closed_by_verified_native_take",
+              nativeTakeOrderId: intent.exchangeOrderId,
+            }, "native take sibling retirement")],
+          );
+        }
         let followUpResult = null;
         if (followUp) {
           followUpResult = await client.query(

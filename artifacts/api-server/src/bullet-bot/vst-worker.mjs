@@ -11344,6 +11344,8 @@ export function createVstWorker({
     allowProtectedExit = false,
     directCommand = null,
   ) {
+    if (nativeTakeProfit?.blocksPosition(record.sourceSignalId))
+      return { kind: "waiting", reason: "native_take_fill_reconciliation_pending" };
     let state = record.snapshot;
     // This is an explicitly approved executor rule, not a fabricated source
     // instruction. The full-exit lane still verifies exact own fills, account,
