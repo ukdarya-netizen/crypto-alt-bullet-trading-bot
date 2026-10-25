@@ -190,6 +190,7 @@ export function createSubscriberTradingManager({
       sourceExitsEnabled: true,
       strategyAuthority: "source",
       exitStrategy: strategy.exitStrategy,
+      positionStrategySwitching: true,
       // "Стоп" or an owner cancel blocks entries; open positions are still managed.
       entryGuard: (signalId) => !runner.tradingEnabled || isEntryBlocked(signalId, "vst"),
       ...VST_ENTRY_BATCH_LIMITS,

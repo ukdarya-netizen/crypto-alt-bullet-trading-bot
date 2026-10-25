@@ -68,6 +68,7 @@ export function createConfiguredVstWorker({
     sourceExitsEnabled: true,
     strategyAuthority: "source",
     exitStrategy: "full_take_5pct",
+    positionStrategySwitching: true,
     entryGuard,
     shouldYieldToUrgentWork,
     ...VST_ENTRY_BATCH_LIMITS,

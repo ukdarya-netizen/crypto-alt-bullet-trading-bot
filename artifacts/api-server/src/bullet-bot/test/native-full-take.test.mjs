@@ -179,6 +179,30 @@ test("a resting take uses a single fresh account cohort, without per-position re
   assert.equal(manager.ownsPosition("source-1"), true, "reserve flat attribution for the owned take");
 });
 
+test("a non-scalp position never acquires a +5% native take from new worker defaults", async () => {
+  const f = fixture();
+  f.record.snapshot.executionStrategy = {
+    version: 1, exitStrategy: "source", strategyAuthority: "policy",
+  };
+  const manager = createNativeTakeManager({ api: f.api, store: f.store,
+    proveFill: async () => ({ verified: false }), clock: () => now });
+  await manager.ensure(f.record);
+  assert.equal(f.state.posts, 0);
+  assert.equal(f.intents.length, 0);
+});
+
+test("a previously pinned +5% position retains its native take with non-scalp worker defaults", async () => {
+  const f = fixture();
+  f.record.snapshot.executionStrategy = {
+    version: 1, exitStrategy: "full_take_5pct", strategyAuthority: "source",
+  };
+  const manager = createNativeTakeManager({ api: f.api, store: f.store,
+    legacyExitStrategy: "source",
+    proveFill: async () => ({ verified: false }), clock: () => now });
+  await manager.ensure(f.record);
+  assert.equal(f.state.posts, 1);
+});
+
 test("ambiguous transport is never retried even when exact client lookup has no result", async () => {
   const f = fixture(); f.state.failTransport = true;
   const manager = () => createNativeTakeManager({ api: f.api, store: f.store,

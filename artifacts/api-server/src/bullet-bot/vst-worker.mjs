@@ -1473,6 +1473,7 @@ export function createVstWorker({
   sourceExitsEnabled = false,
   strategyAuthority = "policy",
   exitStrategy = "source",
+  positionStrategySwitching = false,
   entryGuard,
   shouldYieldToUrgentWork,
   entryBatchSize = 1,
@@ -1638,6 +1639,7 @@ export function createVstWorker({
   // Read-only towards the exchange: one bulk last-price read. Returns the
   // number of new touches so the caller can wake the worker.
   async function observeFullTakePrices() {
+    if (exitStrategy !== FULL_TAKE_5PCT && !positionStrategySwitching) return 0;
     if (typeof store.listOpenPositions !== "function") return 0;
     const open = (await store.listOpenPositions()).filter((record) =>
       record?.status !== "closed" && fullTakePosition(record));
@@ -1839,6 +1841,7 @@ export function createVstWorker({
   }
 
   async function processLatchedFullTakes(recordTiming = null) {
+    if (exitStrategy !== FULL_TAKE_5PCT && !positionStrategySwitching) return null;
     const startedAt = performance.now();
     try {
       const open = (await store.listOpenPositions()).filter((record) =>
