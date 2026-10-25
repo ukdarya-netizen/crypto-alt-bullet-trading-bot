@@ -8,7 +8,7 @@ import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPer
 // @ts-expect-error JavaScript module of the bot.
 import { createBingXLiveApi, createBingXOutboundPacer } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { SUBSCRIBER_STRATEGIES, subscriberSchema } from "../bullet-bot/subscriber-trading.mjs";
+import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema } from "../bullet-bot/subscriber-trading.mjs";
 
 /**
  * Subscribers (owner's family first):
@@ -88,6 +88,16 @@ async function performance(id: number) {
   ]);
   return { trades: closed.rows.map(vstPerformanceRow), openPositions: open.rows[0]?.n ?? 0 };
 }
+
+// The table creates itself on first use (no drizzle push needed).
+router.use(["/me", "/journal/subscribers"], async (_req, _res, next) => {
+  try {
+    await ensureSubscribersTable(pool);
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
 
 // ---------------- subscriber (any signed-in person) ----------------
 

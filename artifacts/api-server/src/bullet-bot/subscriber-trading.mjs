@@ -34,6 +34,47 @@ const RECONCILE_MS = 15_000;
 const FEED_MS = 5_000;
 const TAKE_WATCH_MS = 3_000;
 
+// The subscribers table creates itself (same definition as
+// lib/db/src/schema/subscribers.ts), so no drizzle push is needed: a push
+// would also try to rewrite unrelated constraints in the production DB.
+const SUBSCRIBERS_DDL = `CREATE TABLE IF NOT EXISTS subscribers (
+  id serial PRIMARY KEY NOT NULL,
+  clerk_user_id text NOT NULL,
+  email text,
+  name text,
+  status text DEFAULT 'pending' NOT NULL,
+  requested_at timestamp with time zone DEFAULT now() NOT NULL,
+  decided_at timestamp with time zone,
+  decided_by text,
+  strategy text,
+  api_key_encrypted text,
+  api_secret_encrypted text,
+  api_key_last4 text,
+  api_key_verified_at timestamp with time zone,
+  api_key_error text,
+  trading_enabled boolean DEFAULT false NOT NULL,
+  trading_started_at timestamp with time zone,
+  trading_stopped_at timestamp with time zone,
+  runtime_status text,
+  runtime_reason text,
+  runtime_at timestamp with time zone,
+  version integer DEFAULT 0 NOT NULL,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT subscribers_clerk_user_id_unique UNIQUE (clerk_user_id)
+)`;
+const ensuredPools = new WeakMap();
+
+/** Idempotent; the first call per pool creates the table, later calls reuse the result. */
+export function ensureSubscribersTable(pool) {
+  let pending = ensuredPools.get(pool);
+  if (!pending) {
+    pending = pool.query(SUBSCRIBERS_DDL).then(() => true);
+    pending.catch(() => ensuredPools.delete(pool));
+    ensuredPools.set(pool, pending);
+  }
+  return pending;
+}
+
 export function subscriberSchema(id) {
   if (!Number.isSafeInteger(id) || id < 1) throw new Error("invalid subscriber id");
   return `sub_${id}`;
@@ -202,6 +243,7 @@ export function createSubscriberTradingManager({
     if (reconciling || stopped) return;
     reconciling = true;
     try {
+      await ensureSubscribersTable(ownerPool);
       const { rows } = await ownerPool.query(
         `SELECT * FROM subscribers
          WHERE status = 'approved' AND api_key_encrypted IS NOT NULL AND api_key_verified_at IS NOT NULL
