@@ -216,7 +216,9 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
         </div>
         <div className="space-y-2">
           <p className="text-xs font-bold uppercase text-muted-foreground">Маржа</p>
-          <Segmented<PositionSettings["marginMode"]> value={margin} disabled={locked} onChange={setMargin}
+          <Segmented value={margin} disabled={locked} onChange={(next) => {
+            if (next === "ISOLATED" || next === "CROSSED") setMargin(next);
+          }}
             options={[{ id: "ISOLATED", label: "Изолированная" }, { id: "CROSSED", label: "Кросс" }]} />
           <p className="text-xs text-muted-foreground">
             {margin === "ISOLATED"
