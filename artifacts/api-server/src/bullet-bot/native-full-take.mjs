@@ -376,7 +376,8 @@ export function nativeStopBindings(state) {
 // Each operation runs under the existing worker leader lock. Its durable
 // submitted marker precedes transport; a restart may only LOOK UP that client
 // ID, never replay the POST.
-export function createNativeTakeManager({ api, store, proveFill, clock = Date.now }) {
+export function createNativeTakeManager({ api, store, proveFill, clock = Date.now,
+  legacyExitStrategy = "full_take_5pct" }) {
   const native = api.nativeFullTake;
   const blocked = new Set();
   const owned = new Set();
@@ -392,6 +393,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
   }
   async function ensure(record) {
     const state = record.snapshot ?? record;
+    if ((state.executionStrategy?.exitStrategy ?? legacyExitStrategy) !== "full_take_5pct") return;
     if (record.status !== "open" || state.environment !== "vst" || Number(state.leverage) !== 10 ||
         !positive(state.remainingQty) || !state.exchangePositionId || !state.entryOrderId ||
         !state.accountId || String(state.marginMode).toUpperCase() !== "ISOLATED") return;

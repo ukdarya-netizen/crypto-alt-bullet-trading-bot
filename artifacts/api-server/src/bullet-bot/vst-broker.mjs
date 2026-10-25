@@ -10705,10 +10705,10 @@ export function createVstBroker({
 
   return Object.freeze({
     ...(nativeApi.nativeFullTake ? {
-      createNativeTakeProfitManager: (store) => {
+      createNativeTakeProfitManager: (store, options = {}) => {
         nativeEvidenceStore = store;
         return createNativeTakeManager({
-          api: nativeApi, store, clock,
+          api: nativeApi, store, clock, legacyExitStrategy: options.legacyExitStrategy,
           proveFill: (binding, stops) => proveNativeTakeFill(nativeApi, binding, stops, Number(clock())),
         });
       },

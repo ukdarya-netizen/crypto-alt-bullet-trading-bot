@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { capturePositionStrategy, positionStrategy, pinPositionStrategy } from "./position-strategy.mjs";
 import { classifyVstUncertainty, uncertaintyOperation, protectedDegradedMarker, uncertaintyEvidenceKeys, reconcileVstUncertaintyEvidence } from "./vst-uncertainty.mjs";
 import {
   STOP_TRANSFER_PROTOCOL, isStopTransferOperation, createStopTransferJournal,
@@ -1483,9 +1484,12 @@ export function createVstWorker({
   positionProfile = broker?.positionProfile ?? OWNER_POSITION_PROFILE,
 }) {
   const PROFILE = normalizePositionProfile(positionProfile);
-  const nativeTakeProfit = exitStrategy === FULL_TAKE_5PCT &&
+  const strategyDefaults = capturePositionStrategy({ exitStrategy, strategyAuthority });
+  const fullTakePosition = (record) =>
+    positionStrategy(record.snapshot ?? record, strategyDefaults).exitStrategy === FULL_TAKE_5PCT;
+  const nativeTakeProfit =
     typeof broker.createNativeTakeProfitManager === "function"
-    ? broker.createNativeTakeProfitManager(store) : null;
+    ? broker.createNativeTakeProfitManager(store, { legacyExitStrategy: exitStrategy }) : null;
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
   const profileMarginIs = (value) => marginModeIs(value, PROFILE);
@@ -1633,8 +1637,9 @@ export function createVstWorker({
   // Read-only towards the exchange: one bulk last-price read. Returns the
   // number of new touches so the caller can wake the worker.
   async function observeFullTakePrices() {
-    if (exitStrategy !== FULL_TAKE_5PCT || typeof store.listOpenPositions !== "function") return 0;
-    const open = (await store.listOpenPositions()).filter((record) => record?.status !== "closed");
+    if (typeof store.listOpenPositions !== "function") return 0;
+    const open = (await store.listOpenPositions()).filter((record) =>
+      record?.status !== "closed" && fullTakePosition(record));
     forgetClosedFullTakes(open);
     await loadDurableFullTakes(open);
     let latched = 0;
@@ -1833,10 +1838,10 @@ export function createVstWorker({
   }
 
   async function processLatchedFullTakes(recordTiming = null) {
-    if (exitStrategy !== FULL_TAKE_5PCT) return null;
     const startedAt = performance.now();
     try {
-      const open = (await store.listOpenPositions()).filter((record) => record?.status !== "closed");
+      const open = (await store.listOpenPositions()).filter((record) =>
+        record?.status !== "closed" && fullTakePosition(record));
       forgetClosedFullTakes(open);
       await loadDurableFullTakes(open);
       let capabilities;
@@ -2060,6 +2065,13 @@ export function createVstWorker({
   }
 
   async function reserveAndPerform(signalId, phase, request) {
+    if (request.operation === "entry") {
+      const existing = await store.getIntent(signalId, phase);
+      // Replays inherit their original journalled choice. Old requests must
+      // retain their exact shape, otherwise idempotency comparisons would fail.
+      const bound = existing ? existing.request?.executionStrategy : strategyDefaults;
+      if (bound) request = { ...request, executionStrategy: bound };
+    }
     const journaled = isStopTransferOperation(request.operation) &&
       broker.stopTransferJournalVersion === STOP_TRANSFER_PROTOCOL &&
       typeof store.advanceStopTransfer === "function";
@@ -6301,6 +6313,8 @@ export function createVstWorker({
   }
 
   async function finalizeEntry(intent, evidence, capabilities) {
+    const entryStrategy = intent.request.executionStrategy ?? strategyDefaults;
+    const { strategyAuthority } = positionStrategy({ executionStrategy: entryStrategy }, strategyDefaults);
     const request = intent.request;
     const signal = request.signal;
     if (signal.patternId === "impulse_buy" && strategyAuthority !== "source") {
@@ -6333,7 +6347,7 @@ export function createVstWorker({
             evidence.exchangeOrderId.trim() === "") {
           throw new Error("impulse_entry_or_exact_split_quantity_not_verified");
         }
-        const policy = createVstPolicy({ signal, fill: verifiedFill });
+        const policy = pinPositionStrategy(createVstPolicy({ signal, fill: verifiedFill }), entryStrategy);
         const createdAt = Number(clock());
         if (!Number.isSafeInteger(createdAt) || createdAt <= 0) {
           throw new Error("impulse_split_created_at_invalid");
@@ -6510,7 +6524,7 @@ export function createVstWorker({
       }
       return false;
     }
-    const policy = createVstPolicy({ signal, fill });
+    const policy = pinPositionStrategy(createVstPolicy({ signal, fill }), entryStrategy);
     if (strategyAuthority === "source") {
       // The source supplied one position and its initial full-quantity stop,
       // not an independent 80/20 runner strategy.
@@ -11347,7 +11361,8 @@ export function createVstWorker({
   ) {
     if (nativeTakeProfit?.blocksPosition(record.sourceSignalId))
       return { kind: "waiting", reason: "native_take_fill_reconciliation_pending" };
-    let state = record.snapshot;
+    let state = pinPositionStrategy(record.snapshot, strategyDefaults);
+    const { strategyAuthority, exitStrategy } = positionStrategy(state, strategyDefaults);
     // This is an explicitly approved executor rule, not a fabricated source
     // instruction. The full-exit lane still verifies exact own fills, account,
     // position quantity, and each residual stop before committing a closure.
