@@ -8,7 +8,10 @@ import { createVstEndpointPacer } from "../artifacts/api-server/src/bullet-bot/v
 
 export async function main() {
   if (!process.argv.includes("--owner-approved")) throw Error("explicit_owner_approval_required");
-  const path = resolve(".local/vst-bracket-probe/state.json");
+  // The second slot is separately owner-approved. Never erase or reuse the
+  // first attempt's journal; neither slot permits another entry on rerun.
+  const path = resolve(".local/vst-bracket-probe",
+    process.argv.includes("--second-owner-approved") ? "second-state.json" : "state.json");
   await mkdir(dirname(path), { recursive: true });
   const lockPath = `${path}.lock`;
   const lock = await open(lockPath, "wx", 0o600);
