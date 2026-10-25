@@ -121,7 +121,7 @@ test("accepts expired source status without claiming missing closure evidence", 
 test("rejects invalid, stale, or inconsistent responses", async (t) => {
   const cases = [
     ["missing envelope fields", { asOf, positions: [] }, "incomplete_response"],
-    ["invalid source status", { asOf, nextAfterId: null, positions: [sourcePosition(1, { sourceStatus: "unknown" })] }, "invalid_source_status"],
+    ["invalid source status", { asOf, nextAfterId: null, positions: [sourcePosition(1, { sourceStatus: "unsupported-status" })] }, "invalid_source_status"],
     ["terminal position without exit price", { asOf, nextAfterId: null, positions: [sourcePosition(1, { sourceStatus: "profit", sourceClosedAt: asOf })] }, "invalid_response"],
     ["stale snapshot", {
       asOf: "2025-12-31T00:00:00.000Z",

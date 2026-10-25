@@ -51,6 +51,28 @@ Pagination retains every page (200 records by the producer's contract), exact
 sourceSignalId matching, and the full-snapshot consistency checks. The action
 is included in double-sweep fingerprints.
 
+### Nullable source status
+
+A read-only production check on 2026-10-25 found three cards on page 3
+with the exact pair `sourceStatus: null`, `sourceAction: "unknown"` in a
+443-record response. The previous local status enum rejected that pair as
+`invalid_source_status`. The producer's prior written contract did not specify
+nullable statuses; the observed pair provides no lifecycle meaning beyond the
+explicit unknown action.
+
+Accept **only** that null/unknown pair as an observation, preserving the raw
+null. It is not a synonym for expired, cancelled, closed, or absent. Even
+populated closure/price/stop fields on that card do not authorize an exit or a
+protection change. Null with hold/close/review, a missing status, and novel
+unrecognized statuses remain validation failures.
+
+Other cards' independently validated explicit commands may proceed only after
+the entire collection is acquired and validated, including both stable sweeps
+when page timestamps differ. This is not partial-result recovery: transport,
+body, pagination, freshness, duplicate or consistency failures still reject
+the whole acquisition. Unknown and absent cards never prove position closure;
+VST still requires exchange-backed execution and REAL remains read-only.
+
 Every completed poll logs record count and hold/close/review/unknown counts.
 Permanent contract/authentication failures produce an immediate, throttled
 Telegram alert. Transport outages retain the existing sustained-fault policy

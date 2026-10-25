@@ -215,7 +215,11 @@ function validatePosition(position) {
   }
   const id = sourceSignalKey(position.sourceSignalId);
   const status = position.sourceStatus;
-  if (!SOURCE_STATUSES.has(status)) {
+  // Observed producer contract: a delivered card can have no lifecycle status
+  // and explicitly say "unknown". Preserve that null; it is neither inactive
+  // nor closed. No other action or unrecognized status gets this exception.
+  const explicitUnknownStatus = status === null && position.sourceAction === "unknown";
+  if (!SOURCE_STATUSES.has(status) && !explicitUnknownStatus) {
     fail("invalid_source_status", "Position sync response contains an unsupported source status");
   }
   if (typeof position.symbol !== "string" || position.symbol.length === 0) {
