@@ -9,7 +9,7 @@ import { createVstTelegramNotifier } from "../vst-telegram.mjs";
 
 const event = (kind, extra = {}) => ({ kind, symbol: "WOOUSDT", ...extra });
 
-test("Telegram has exactly four concise trade outcome messages", () => {
+test("Telegram reports concise confirmed outcomes without inventing a closure reason", () => {
   for (const [row, text] of [
     [event("vst_entry_verified"), "Позиция открыта."],
     [event("vst_entry_margin_top_up_pending"), "Позиция открыта."],
@@ -19,9 +19,9 @@ test("Telegram has exactly four concise trade outcome messages", () => {
     }), "Позиция не открыта.\nПричина: ордер не исполнен, позиции на бирже нет"],
     [event("vst_action_reconciled", {
       request: { operation: "close_leg", nextPolicy: { status: "closed" } },
-    }), "Позиция зафиксирована."],
+    }), "Позиция закрыта."],
     [event("source_exit_completed", { detail: { outcome: "closed" } }),
-      "Позиция зафиксирована."],
+      "Позиция закрыта."],
     [event("vst_triggered_stop_verified"), "Сработал стоп-лосс."],
     [event("source_exit_completed", {
       detail: { outcome: "closed", detail: { closureOrigin: "already_committed_protective_stop" } },
@@ -72,6 +72,40 @@ test("confirmed close paths are covered without calling a market close a stop lo
   })), "closed");
 });
 
+test("source cancellation stays cancellation through close, cleanup and restart reconciliation", () => {
+  const sourceEvidence = { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" };
+  for (const row of [
+    event("vst_source_exit_closed", { detail: { sourceEvidence } }),
+    event("vst_source_exit_flat_cleanup_pending", { detail: { sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", evidence: sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", detail: { sourceEvidence } } }),
+    event("vst_action_reconciled", { request: {
+      operation: "close_leg", nextPolicy: { status: "closed" }, sourceExit: { evidence: sourceEvidence },
+    } }),
+  ]) assert.equal(formatVstTradeOutcome({ ...row, symbol: "IDUSDT" }),
+    "BingX VST · IDUSDT\nПозиция закрыта: сигнал отменён.");
+  assert.equal(vstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "pending", evidence: sourceEvidence },
+  })), null);
+  assert.equal(vstTradeOutcome(event("vst_action_reconciled", {
+    request: { operation: "close_leg", nextPolicy: { status: "open" }, sourceExit: { evidence: sourceEvidence } },
+  })), null);
+  assert.equal(formatVstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "closed", evidence: sourceEvidence,
+      detail: { closureOrigin: "already_committed_protective_stop" } },
+  })), "BingX VST · WOOUSDT\nСработал стоп-лосс.");
+});
+
+test("a confirmed five-percent take is distinguished from cancellation and an unknown close reason", () => {
+  const sourceEvidence = { reason: "fixed_price_take_profit_5pct", rule: "full_take_5pct" };
+  for (const row of [
+    event("vst_source_exit_closed", { detail: { sourceEvidence } }),
+    event("source_exit_completed", { detail: { outcome: "closed", evidence: sourceEvidence } }),
+  ]) assert.equal(formatVstTradeOutcome(row), "BingX VST · WOOUSDT\nПозиция зафиксирована: тейк +5%.");
+  assert.equal(formatVstTradeOutcome(event("vst_source_exit_closed")),
+    "BingX VST · WOOUSDT\nПозиция закрыта.");
+});
+
 test("WOO lifecycle sends an opening and final result, never margin or reconciliation text", async () => {
   const rows = [
     event("vst_margin_mode_preparation_verified"),
@@ -80,8 +114,12 @@ test("WOO lifecycle sends an opening and final result, never margin or reconcili
     event("vst_margin_top_up_verified"),
     event("vst_entry_verified"),
     event("vst_action_reconciled", { request: { operation: "raise_stop" } }),
-    event("vst_source_exit_closed"),
-    event("source_exit_completed", { detail: { outcome: "closed" } }),
+    event("vst_source_exit_closed", { detail: {
+      sourceEvidence: { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" },
+    } }),
+    event("source_exit_completed", { detail: {
+      outcome: "closed", evidence: { sourceStatus: "cancelled", sourceAction: "review", reason: "source_withdrawal" },
+    } }),
   ].map((row, index) => ({
     ...row, id: String(index), source_signal_id: "woo-test",
     body: { symbol: row.symbol }, created_at: new Date(),
@@ -121,7 +159,7 @@ test("WOO lifecycle sends an opening and final result, never margin or reconcili
   for (let index = 0; index < 4; index++) await notifier.tick();
   assert.deepEqual(messages, [
     "BingX VST · WOOUSDT\nПозиция открыта.",
-    "BingX VST · WOOUSDT\nПозиция зафиксирована.",
+    "BingX VST · WOOUSDT\nПозиция закрыта: сигнал отменён.",
   ]);
   assert.equal(acknowledged.size, rows.length);
 });

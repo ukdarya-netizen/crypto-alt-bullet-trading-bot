@@ -9,6 +9,17 @@ const ENTRY_KINDS = new Set([
   "vst_impulse_entry_verified_split_pending",
 ]);
 
+function confirmedCloseOutcome(event) {
+  const detail = event.detail ?? {};
+  const evidence = detail.sourceEvidence ?? detail.evidence ??
+    detail.detail?.sourceEvidence ?? event.request?.sourceExit?.evidence ??
+    event.request?.nextPolicy?.sourceExitEvidence ?? event.outcome?.sourceEvidence;
+  if (evidence?.sourceStatus === "cancelled") return "cancelled";
+  if (evidence?.rule === "full_take_5pct" ||
+      evidence?.reason === "fixed_price_take_profit_5pct") return "take";
+  return "closed";
+}
+
 export function vstTradeOutcome(event) {
   if (!event) return null;
   const detail = event.detail ?? {};
@@ -32,20 +43,20 @@ export function vstTradeOutcome(event) {
     "vst_impulse_flat_close_cleanup_pending",
     "vst_source_exit_closed",
     "vst_source_exit_flat_cleanup_pending",
-  ].includes(event.kind)) return "closed";
+  ].includes(event.kind)) return confirmedCloseOutcome(event);
   if (event.kind === "vst_protected_strategy_exit_verified") {
-    return event.request?.nextPolicy?.status === "closed" ? "closed" : null;
+    return event.request?.nextPolicy?.status === "closed" ? confirmedCloseOutcome(event) : null;
   }
   if (event.kind === "vst_action_reconciled") {
     const operation = event.request?.operation ?? event.outcome?.operation;
     return operation === "close_leg" && event.request?.nextPolicy?.status === "closed"
-      ? "closed" : null;
+      ? confirmedCloseOutcome(event) : null;
   }
-  if (event.kind === "exchange_history_provenance") return "closed";
+  if (event.kind === "exchange_history_provenance") return confirmedCloseOutcome(event);
   if (event.kind === "source_exit_completed" && detail.outcome === "closed") {
     const origin = detail.detail?.closureOrigin ?? detail.closureOrigin;
     if (origin === "external_close_verified_flat") return null; // reported by its own event
-    return origin === "already_committed_protective_stop" ? "stop" : "closed";
+    return origin === "already_committed_protective_stop" ? "stop" : confirmedCloseOutcome(event);
   }
   // Unknown or pending is not equivalent to "not opened". Do not report an
   // execution result until the worker has proved one.
@@ -55,7 +66,9 @@ export function vstTradeOutcome(event) {
 const OUTCOME_TEXT = {
   opened: "Позиция открыта.",
   not_opened: "Позиция не открыта.",
-  closed: "Позиция зафиксирована.",
+  closed: "Позиция закрыта.",
+  cancelled: "Позиция закрыта: сигнал отменён.",
+  take: "Позиция зафиксирована: тейк +5%.",
   stop: "Сработал стоп-лосс.",
   closed_external: "Позиции больше нет на бирже (закрыта вручную или вне бота). Бот это проверил и снял её с сопровождения.",
   unmanaged: "Бот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.",
