@@ -52,10 +52,16 @@ export async function main() {
             .includes(url.pathname)) {
         // Only BTC order responses, never credentials, request signatures,
         // account balances or position/account identity payloads.
-        await appendFile(`${path}.responses.ndjson`, JSON.stringify({
-          at: new Date().toISOString(), method, path: url.pathname,
-          httpStatus: response.status, body: await response.clone().text(),
-        }) + "\n", { mode: 0o600 });
+        try {
+          await appendFile(`${path}.responses.ndjson`, JSON.stringify({
+            at: new Date().toISOString(), method, path: url.pathname,
+            httpStatus: response.status, body: await response.clone().text(),
+          }) + "\n", { mode: 0o600 });
+        } catch (error) {
+          // A diagnostic sink must not turn an actual exchange response
+          // into a fabricated network failure or discard an exact order ID.
+          console.error(`probe_response_trace_unavailable:${error.code ?? error.name}`);
+        }
       }
       return response;
     },
