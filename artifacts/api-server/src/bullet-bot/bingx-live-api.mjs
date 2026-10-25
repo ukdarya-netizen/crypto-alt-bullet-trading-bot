@@ -1844,7 +1844,7 @@ export function createBingXLiveApi({
   }
 
   async function placeVstBoundedLong({
-    symbol, quantity, maxPrice, stopLoss, clientOrderId, onAttemptStarted,
+    symbol, quantity, maxPrice, stopLoss, clientOrderId, onAttemptStarted, beforeSign,
   }) {
     const name = requireVstBtc(symbol);
     if (typeof clientOrderId !== "string" ||
@@ -1888,6 +1888,7 @@ export function createBingXLiveApi({
     submittedClientOrderIds.add(clientOrderId);
     const result = await request("POST", PATH.order, params, {
       ...(onAttemptStarted !== undefined ? { beforeTransport: onAttemptStarted } : {}),
+      ...(beforeSign !== undefined ? { beforeSign } : {}),
     });
     orderIdentifierFrom(result, "submitted order ID");
     return result;

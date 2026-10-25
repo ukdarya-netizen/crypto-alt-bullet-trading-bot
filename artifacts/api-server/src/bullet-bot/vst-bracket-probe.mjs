@@ -97,6 +97,16 @@ export async function runControlledVstBracketProbe({
     try {
       await api.placeVstBoundedLong({
         symbol: SYMBOL, quantity, maxPrice, stopLoss, clientOrderId: state.entryClientId,
+        beforeSign: async () => {
+          const [positions, orders, mode, margin, leverage] = await Promise.all([
+            api.getPositions(SYMBOL), api.getOpenOrders(SYMBOL),
+            api.getPositionMode(), api.getMarginType(SYMBOL), api.getLeverage(SYMBOL),
+          ]);
+          if (active(positions).length || orders.length || mode !== "HEDGE" ||
+              margin !== "ISOLATED" || Number(leverage.longLeverage) !== 10) {
+            throw Error("probe_pre_transport_state_changed");
+          }
+        },
       });
     } catch (error) {
       await record({ entryTransportError: error.message });
