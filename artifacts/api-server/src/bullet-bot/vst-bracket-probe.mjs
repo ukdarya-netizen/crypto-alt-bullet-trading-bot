@@ -32,9 +32,20 @@ export function inspectVstBracketCohort({ orders, stop, take, position, expected
     try { return sameOrder(...args); } catch { return false; }
   };
   const owns = (row) => {
+    const aliases = [row.positionId, row.positionID]
+      .filter((value) => value !== undefined && value !== null && value !== "");
+    if (new Set(aliases.map(String)).size > 1) return false;
     const pid = positionId(row);
     if (exactId(pid)) return pid === expected.positionId;
+    if (pid !== undefined && pid !== null && Number(pid) !== 0) return false;
     return (row.mainOrderId ?? row.parentOrderId) === expected.entryOrderId;
+  };
+  const queryOwnerCompatible = (row) => {
+    if (!row || typeof row !== "object") return false;
+    const aliases = [row.positionId, row.positionID]
+      .filter((value) => value !== undefined && value !== null && value !== "");
+    return new Set(aliases.map(String)).size <= 1 &&
+      aliases.every((value) => String(value) === "0" || value === expected.positionId);
   };
   const openStop = orders.find((row) => matches(row, expected.stopOrderId,
     "STOP_MARKET", expected.quantity, expected.stopLoss) && owns(row));
@@ -58,9 +69,10 @@ export function inspectVstBracketCohort({ orders, stop, take, position, expected
     position: Boolean(position && position.id === expected.positionId &&
       Number(position.quantity) === Number(expected.quantity)),
     count: orders.length === 2,
-    stopQuery: matches(stop, expected.stopOrderId, "STOP_MARKET", expected.quantity, expected.stopLoss),
-    takeQuery: matches(take, expected.takeOrderId, "TAKE_PROFIT_MARKET",
-      expected.quantity, expected.takePrice) || conditionalPlaceholder,
+    stopQuery: queryOwnerCompatible(stop) &&
+      matches(stop, expected.stopOrderId, "STOP_MARKET", expected.quantity, expected.stopLoss),
+    takeQuery: queryOwnerCompatible(take) && (matches(take, expected.takeOrderId, "TAKE_PROFIT_MARKET",
+      expected.quantity, expected.takePrice) || conditionalPlaceholder),
     stopOpen: Boolean(openStop),
     takeOpen: Boolean(openTake),
     noForeign: orders.every((row) => {

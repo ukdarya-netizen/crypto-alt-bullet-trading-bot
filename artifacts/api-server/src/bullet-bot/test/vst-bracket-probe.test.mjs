@@ -185,6 +185,8 @@ test("corroboration never accepts an ordinary LIMIT, wrong target, volume, ID, s
     (c) => { c.take.origQty = "0.0010"; },
     (c) => { c.take.side = "BUY"; },
     (c) => { c.take.status = "CANCELLED"; },
+    (c) => { c.take.positionID = "999"; },
+    (c) => { c.stop.positionID = "999"; },
     (c) => { c.orders[0].stopPrice = "84208.3"; },
     (c) => { c.orders[0].positionID = "999"; },
     (c) => { c.orders[0].origQty = "0.0010"; },
