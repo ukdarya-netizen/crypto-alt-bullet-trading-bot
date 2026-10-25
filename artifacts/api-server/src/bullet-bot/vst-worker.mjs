@@ -1473,6 +1473,7 @@ export function createVstWorker({
   strategyAuthority = "policy",
   exitStrategy = "source",
   entryGuard,
+  shouldYieldToUrgentWork,
   entryBatchSize = 1,
   entryBatchBudgetMs = 10_000,
   onBlocked,
@@ -1485,6 +1486,12 @@ export function createVstWorker({
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
   const profileMarginIs = (value) => marginModeIs(value, PROFILE);
+  async function urgentWorkPending() {
+    if (typeof shouldYieldToUrgentWork !== "function") return false;
+    try { return await shouldYieldToUrgentWork() === true; }
+    catch { return true; }
+  }
+  const urgentYield = () => ({ kind: "waiting", reason: "priority_work_queued" });
   let directCloseCompletion = null;
   // ---- Fixed +5% take: detection, durable latch, dedicated close lane and
   // escalation. Failure policy:
@@ -6928,6 +6935,7 @@ export function createVstWorker({
     row, capabilities, readCapabilities = null, planningInputHint = null,
     batchExecution = false, batchBudget = null,
   ) {
+    if (await urgentWorkPending()) return urgentYield();
     let signal = row.body;
     const entryBlock = typeof signal?.sourceSignalId === "string" && entryGuard
       ? await entryGuard(signal.sourceSignalId) : false;
@@ -7127,6 +7135,7 @@ export function createVstWorker({
       }
 
       if (marginPreparationRequired) {
+        if (await urgentWorkPending()) return urgentYield();
         const request = {
           operation: "prepare_margin_mode",
           accountId: capabilities.accountId,
@@ -7205,6 +7214,7 @@ export function createVstWorker({
         return { kind: "prepared", reason: "isolated_margin_mode_confirmed" };
       }
 
+      if (await urgentWorkPending()) return urgentYield();
       const leverageRequest = {
         operation: "set_isolated_leverage",
         accountId: capabilities.accountId,
@@ -7245,6 +7255,7 @@ export function createVstWorker({
         return { kind: "prepared", reason: "isolated_leverage_confirmed" };
       }
 
+      if (await urgentWorkPending()) return urgentYield();
       const request = {
         operation: "entry",
         entryOrderType: "MARKET",
@@ -14398,6 +14409,7 @@ export function createVstWorker({
         };
       }
 
+      if (await urgentWorkPending()) return urgentYield();
       stageStarted = performance.now();
       await resumeExchangeVerifiedFailedEntries();
       if (await recoverOneSubmittedFailedMarginTopUp()) {
@@ -14579,6 +14591,7 @@ export function createVstWorker({
       // this lane. Source exits, fresh global protection, reconciliation and a
       // new account read have already run on this tick. No cached capability
       // verdict or account snapshot authorizes the next operation.
+      if (await urgentWorkPending()) return urgentYield();
       if (!reconciliation.expiredMarginPreparation &&
           !reconciliation.reconciledMarginPreparation) {
         const continued = await continuePreparedEntry(
@@ -14601,6 +14614,7 @@ export function createVstWorker({
       // before this loop on every tick regardless.
       const managedThisTick = await positionsToManageThisTick(openPositions);
       for (const record of managedThisTick) {
+        if (await urgentWorkPending()) return urgentYield();
         // Source withdrawals may be enqueued while a multi-position pass is
         // reading/observing an earlier position. Re-check at every boundary
         // so the next unrelated position cannot consume the rest of the tick.
@@ -15182,6 +15196,9 @@ export function createVstWorker({
               return { input: await broker.readPlanningInputs(signal) };
             },
             execute: async (candidate, planningHint, planningError) => {
+              if (await urgentWorkPending()) {
+                return { ...urgentYield(), batchStop: true };
+              }
               if (planningError) {
                 return { kind: "waiting", reason: "entry_batch_planning_read_failed",
                   sourceSignalId: candidate.sourceSignalId,

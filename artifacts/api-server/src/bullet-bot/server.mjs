@@ -49,6 +49,7 @@ export const VST_ENTRY_BATCH_LIMITS = Object.freeze({
 
 export function createConfiguredVstWorker({
   store, broker, workerFactory = createVstWorker, onBlocked, onTiming, entryGuard,
+  shouldYieldToUrgentWork,
 }) {
   const sourceExitStoreMethods = [
     "queueSourceExitRequests",
@@ -68,6 +69,7 @@ export function createConfiguredVstWorker({
     strategyAuthority: "source",
     exitStrategy: "full_take_5pct",
     entryGuard,
+    shouldYieldToUrgentWork,
     ...VST_ENTRY_BATCH_LIMITS,
     onBlocked,
     onTiming,
@@ -108,6 +110,7 @@ export function createServer({
   store, token, mode = "paper", clock = Date.now, basePath = "",
   ingestAliases = [], marketCheck, paperStore = store, vstEnabledAt, onIngress,
   commandInbox,
+  onWorkQueued,
 }) {
   if (!token) throw new Error("TRADING_INGEST_TOKEN is required");
   if (mode !== "paper" && mode !== "vst" && mode !== "both")
@@ -245,6 +248,9 @@ export function createServer({
         if (saved.kind === "conflict") {
           json(res, 409, { error: { code: saved.reason } });
           return;
+        }
+        if (saved.kind !== "duplicate") {
+          try { onWorkQueued?.({ kind: "source_command" }); } catch {}
         }
         json(res, saved.kind === "duplicate" ? 200 : 202,
           { accepted: true, duplicate: saved.kind === "duplicate", command: saved.receipt });

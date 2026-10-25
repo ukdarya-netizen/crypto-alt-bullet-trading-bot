@@ -95,6 +95,9 @@ export function createIndependentWorkerTickScheduler({
     scheduleVstWake();
     return true;
   };
+  // A wake is a scheduling hint, never permission for another concurrent
+  // exchange writer. The active tick can yield at a read-only boundary.
+  stop.hasPendingVstWake = () => !stopped && vstWakePending;
   stop.drain = async () => {
     stop();
     if (vstBusy || paperBusy) {

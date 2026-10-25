@@ -1,5 +1,6 @@
 import { createHmac } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createCoalescedPriceRead } from "./coalesced-price-read.mjs";
 import { refreshVstEntrySizing } from "./vst-fresh-entry-sizing.mjs";
 import { OWNER_POSITION_PROFILE, allocationBudget, normalizePositionProfile } from "./vst-position-profile.mjs";
 import {
@@ -2863,21 +2864,11 @@ export function createBingXLiveApi({
   // contract. Used only to observe the fixed +5% take between management
   // ticks; it never authorizes a write by itself. Rows without a fresh
   // exchange timestamp are dropped, never back-filled with the local clock.
-  let lastPriceReadAt = 0;
-  async function getVstLastPrices(symbols) {
-    if (environment !== "vst") {
-      throw new BingXLiveApiError("VST last-price reads are unavailable outside VST");
-    }
-    const wanted = new Set((Array.isArray(symbols) ? symbols : []).map(symbolName));
-    if (wanted.size === 0) return [];
-    // Deliberately NOT on the shared signed-request pacer: this single public
-    // market-data read ran every 2.5s and took ~40% of the 1.1s-gap slots
-    // that entries and position management need. It has its own floor.
-    const sinceLast = Number(clock()) - lastPriceReadAt;
-    if (sinceLast < LAST_PRICE_MIN_GAP_MS) {
-      throw new BingXLiveApiError("VST last-price read throttled", { transportStage: "pre_transport" });
-    }
-    lastPriceReadAt = Number(clock());
+  // Independent of the signed trading pacer. A timer racing another reader
+  // waits/joins the in-flight read instead of reporting a fake transport fault.
+  const readLastPriceRows = createCoalescedPriceRead({
+    clock, sleep, minGapMs: LAST_PRICE_MIN_GAP_MS,
+    read: async () => {
     let response;
     try {
       response = await fetchImpl(`${origin}${VST_TICKER_PATH}`,
@@ -2895,9 +2886,19 @@ export function createBingXLiveApi({
         httpStatus: response?.status, code: payload?.code, transportStage: "exchange_response",
       });
     }
+    return payload.data;
+    },
+  });
+  async function getVstLastPrices(symbols) {
+    if (environment !== "vst") {
+      throw new BingXLiveApiError("VST last-price reads are unavailable outside VST");
+    }
+    const wanted = new Set((Array.isArray(symbols) ? symbols : []).map(symbolName));
+    if (wanted.size === 0) return [];
+    const rows = await readLastPriceRows();
     const receivedAt = Number(clock());
     const result = [];
-    for (const row of payload.data) {
+    for (const row of rows) {
       if (!wanted.has(row?.symbol)) continue;
       let price;
       try { price = strictNumeric(row.lastPrice, "VST last price"); } catch { continue; }

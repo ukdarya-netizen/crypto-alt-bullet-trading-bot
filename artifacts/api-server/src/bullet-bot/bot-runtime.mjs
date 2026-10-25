@@ -175,10 +175,12 @@ export function botRequestHandler(req, res) {
     paperStore: store,
     commandInbox,
     token: process.env.TRADING_INGEST_TOKEN,
+    onWorkQueued: () => workerTickScheduler?.wakeVst?.(),
     mode,
     vstEnabledAt: runtimeStartedAt,
     onIngress: (event) => {
       process.stdout.write(`Bullet signal ingress: ${JSON.stringify(event)}\n`);
+      if (event.outcome === "received") workerTickScheduler?.wakeVst?.();
     },
     basePath: "/api/bot",
     ingestAliases: ["/api/trading/signals"],
@@ -379,6 +381,7 @@ export async function startBotWorker() {
           process.stdout.write(`Bullet VST stage timing: ${JSON.stringify(timing)}\n`);
         },
         entryGuard: id => commandInbox.isEntryBlocked(id, "vst"),
+        shouldYieldToUrgentWork: () => workerTickScheduler?.hasPendingVstWake?.() === true,
       })
     : null;
   paperWorker = paperActive
