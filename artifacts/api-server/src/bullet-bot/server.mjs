@@ -13,7 +13,7 @@ import { createVstBroker } from "./vst-broker.mjs";
 import { createIngressAuditEvent } from "./ingress-audit.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024;
-const VST_WRITE_PATHS = new Set([
+export const VST_WRITE_PATHS = new Set([
   "/openApi/swap/v2/trade/leverage",
   "/openApi/swap/v2/trade/marginType",
   "/openApi/swap/v2/trade/order",

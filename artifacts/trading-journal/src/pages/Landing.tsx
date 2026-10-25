@@ -32,7 +32,7 @@ export default function Landing() {
             </p>
             </div>
             <p className="mt-12 max-w-md border-l-2 border-amber-400/70 pl-3 text-xs leading-5 text-muted-foreground">
-              Доступ к данным получает только назначенный владелец. Реальное исполнение сделок отключено.
+              Зарегистрируйтесь — владелец одобрит заявку, и вы подключите свой счёт BingX. Сейчас торговля идёт только на демо-счёте VST.
             </p>
           </div>
           <div className="cyber-landing-console" aria-label="Приватный торговый журнал">

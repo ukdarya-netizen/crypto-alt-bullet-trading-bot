@@ -499,7 +499,12 @@ function sameSourceExitProvenance(left, right) {
  * PostgreSQL persistence exclusively for VST. It has no PAPER-table access,
  * no schema installation, and no broker/network calls.
  */
-export function createVstStore(pool) {
+// Each subscriber's ledger (its own schema) gets its own leader lock id so
+// the owner's worker and every subscriber worker tick independently.
+export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
+  if (!Number.isSafeInteger(leaderLockId) || leaderLockId < 1 || leaderLockId > 2_147_483_647) {
+    throw new RangeError("VST leader lock id must be a positive int4");
+  }
   if (!pool || typeof pool.query !== "function" || typeof pool.connect !== "function") {
     throw new TypeError("createVstStore requires a PostgreSQL pool");
   }
@@ -756,7 +761,7 @@ export function createVstStore(pool) {
       try {
         const result = await client.query(
           "SELECT pg_try_advisory_lock($1, $2) AS acquired",
-          [LOCK_NAMESPACE, LOCK_ID],
+          [LOCK_NAMESPACE, leaderLockId],
         );
         acquired = result.rows[0]?.acquired === true;
         if (!acquired) return null;
@@ -766,7 +771,7 @@ export function createVstStore(pool) {
           try {
             const unlocked = await client.query(
               "SELECT pg_advisory_unlock($1, $2) AS released",
-              [LOCK_NAMESPACE, LOCK_ID],
+              [LOCK_NAMESPACE, leaderLockId],
             );
             if (unlocked.rows[0]?.released !== true) destroyClient = true;
           } catch {

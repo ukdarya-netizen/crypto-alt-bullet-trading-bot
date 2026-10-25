@@ -12,6 +12,7 @@ import { recordVstDiagnostic } from "./vst-diagnostics.mjs";
 import { createVstContractDriftMonitor } from "./vst-contract-drift.mjs";
 import { postTelegramMessage } from "./telegram-client.mjs";
 import { createFullTakeWatchHealth } from "./full-take-watch-health.mjs";
+import { createSubscriberTradingManager } from "./subscriber-trading.mjs";
 import { TECHNICAL_TELEGRAM_ALERTS_ENABLED } from "./telegram-trade-outcomes.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstEntryHealthMonitor } from "./vst-entry-health.mjs";
@@ -71,6 +72,7 @@ let sourceFreshnessWatchdog;
 let vstFillArchiveScheduler;
 let workerTickScheduler;
 let fullTakeWatchTimer;
+let subscriberTrading;
 let stopping = false;
 let drainPromise;
 
@@ -437,6 +439,15 @@ export async function startBotWorker() {
       process.stderr.write(`Bullet PAPER worker tick failed: ${error instanceof Error ? error.name : "Error"}\n`);
     },
   });
+  // Subscriber (family) trading: isolated VST workers, one per approved and
+  // started subscriber. Runs only next to the owner's production VST worker.
+  if (vstWorker) {
+    subscriberTrading = createSubscriberTradingManager({
+      ownerPool: pool,
+      isEntryBlocked: (id, engine) => commandInbox.isEntryBlocked(id, engine),
+    });
+    subscriberTrading.start();
+  }
   // Fixed +5% take: a read-only last-price watcher between management ticks.
   // A touch is latched with exchange-timestamped evidence and wakes the VST
   // worker, which closes through the normal verified exit lane.
@@ -559,6 +570,7 @@ export async function startBotWorker() {
         // Admit independent exits first; observational/control persistence
         // cannot erase or starve an already validated risk-reducing decision.
         const exits = await vstStore.queueSourceExitRequests({ asOf, positions, observedAt });
+        await subscriberTrading?.queueSourceExits({ asOf, positions, allPositions, observedAt });
         const controls = await vstStore.syncSourceControls({ asOf, positions: allPositions, observedAt });
         if (controls.refusals.length) process.stderr.write(
           `Bullet source control refusals: ${JSON.stringify(controls.refusals)}\n`,
@@ -802,6 +814,7 @@ export async function startBotWorker() {
 export function stopBotWorker() {
   stopping = true;
   workerTickScheduler?.();
+  void subscriberTrading?.stop();
   clearInterval(fullTakeWatchTimer);
   fullTakeWatchTimer = undefined;
   sourceLifecycleScheduler?.stop();

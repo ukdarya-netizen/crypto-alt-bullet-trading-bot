@@ -52,6 +52,13 @@ An isolated, fail-closed execution service that receives confirmed bot signals a
 - The owner also selected no fixed cap for **future BingX** isolated-margin top-ups. This may use funds beyond the $10 initial margin. It is a risk-policy choice for preparation, not approval to enable live orders or write to BingX; BingX-specific preflight, funded top-up, protection, and reconciliation must be independently implemented and verified.
 - Calculate required extra isolated margin and verify available funds **before submitting an entry**, using the signal-specific stop, exchange risk tier, estimated fill, maintenance margin and fees; skip an unaffordable entry. Bybit's add-margin endpoint requires an existing position, so under the owner's isolated 10x setting the preplanned funds can only be added **immediately after a confirmed fill**, followed by exchange-side liquidation-price verification. Do not claim funds are already in position before fill or that the fill-to-top-up interval is risk-free. This preflight/top-up flow is not implemented.
 
+## Subscribers (family) — VST only
+- Any signed-in non-owner gets a pending request (`subscribers` table, drizzle). Owner approves/rejects/blocks in Journal → «Подписчики».
+- Approved subscriber: saves a BingX key (checked: GET /openApi/v1/account/apiPermissions must NOT contain 4/5/7 transfer/withdraw rights, then a read-only VST balance), picks a strategy (only «Тейк +5%» is executable now), presses «Старт».
+- Keys are AES-256-GCM encrypted with the Replit Secret `SUBSCRIBER_KEYS_SECRET` (32+ random chars). Never returned by any endpoint. Rotating that secret makes saved keys unreadable (subscribers re-enter them).
+- Each started subscriber runs an isolated copy of the VST worker (`bullet-bot/subscriber-trading.mjs`): own schema `sub_<id>` (vst_* tables copied with LIKE public.*), own leader lock, own BingX key/pacer. Signals and AltBullet exits the owner's bot receives are copied to it. «Стоп» blocks new entries; open positions are still managed until closed.
+- Mainnet is NOT enabled for subscribers.
+
 ## Product
 
 - Accept confirmed, idempotent trading signals into a durable queue.

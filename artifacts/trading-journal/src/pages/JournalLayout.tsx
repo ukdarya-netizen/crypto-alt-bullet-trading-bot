@@ -1,8 +1,10 @@
 import { Switch, Route, Link, useLocation } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
-import { LogOut, LayoutDashboard, List, History, ShieldAlert, Terminal, Wallet, Target, Database, Activity, FlaskConical } from "lucide-react";
+import { LogOut, LayoutDashboard, List, History, ShieldAlert, Terminal, Wallet, Target, Database, Activity, FlaskConical, Users } from "lucide-react";
 import { BrandLockup, BrandMark } from "@/components/brand";
 import JournalOverview from "./JournalOverview";
+import JournalSubscribers from "./JournalSubscribers";
+import SubscriberCabinet from "./SubscriberCabinet";
 import { useGetJournalAccess, getGetJournalAccessQueryKey } from "@workspace/api-client-react";
 import JournalOpen from "./JournalOpen";
 import JournalHistory from "./JournalHistory";
@@ -21,6 +23,7 @@ const NAV_ITEMS = [
   { href: "/journal/open", label: "Открытые", short: "Открытые", sub: "все позиции сейчас", icon: List },
   { href: "/journal/history", label: "История", short: "История", sub: "все сделки", icon: History },
   { href: "/journal/health", label: "Bot Health", short: "Health", sub: "состояние бота", icon: Activity },
+  { href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки и доступ", icon: Users },
 ] as const;
 
 export default function JournalLayout() {
@@ -83,24 +86,10 @@ export default function JournalLayout() {
     );
   }
 
+  // Everyone who is not the owner gets the subscriber cabinet (request,
+  // approval wait, key, strategy, start/stop).
   if (!access.authorized) {
-    return (
-      <div className="min-h-screen bg-background flex flex-col items-center justify-center p-4">
-        <div className="max-w-md w-full border border-border bg-card p-8 text-center space-y-6 shadow-sm">
-          <ShieldAlert className="w-12 h-12 mx-auto text-destructive" />
-          <h2 className="text-xl font-bold tracking-tight uppercase">Доступ запрещён</h2>
-          <p className="text-sm text-muted-foreground">
-            Этот журнал доступен только назначенному владельцу.
-          </p>
-          <button 
-            onClick={() => signOut({ redirectUrl: "/" })}
-            className="text-xs text-muted-foreground hover:text-foreground underline uppercase tracking-wider mt-4"
-          >
-            Выйти
-          </button>
-        </div>
-      </div>
-    );
+    return <SubscriberCabinet />;
   }
 
   const current = NAV_ITEMS.find((item) => item.href === location) ??
@@ -184,6 +173,7 @@ export default function JournalLayout() {
             <Route path="/journal/open" component={JournalOpen} />
             <Route path="/journal/history" component={JournalHistory} />
             <Route path="/journal/health" component={JournalHealth} />
+            <Route path="/journal/subscribers" component={JournalSubscribers} />
             <Route path="/journal/vst-review" component={JournalVstReview} />
             <Route path="/journal/trades/:id" component={JournalTradeDetail} />
           </Switch>
