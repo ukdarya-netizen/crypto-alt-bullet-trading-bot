@@ -23,6 +23,9 @@ export function createVstEndpointPacer({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 } = {}) {
   const queue = [];
+  // Opaque per-client identities, never API keys. Retain only callers with
+  // queued work so short-lived subscriber clients cannot leak here.
+  const callers = [];
   const endpointNext = new Map();
   let logicalNow = 0;
   let globalNext = 0;
@@ -46,7 +49,10 @@ export function createVstEndpointPacer({
       while (queue.length) {
         const time = now();
         const available = queue.filter((item) => readyAt(item) <= time);
-        const item = available.find((candidate) => candidate.priority) ?? available[0];
+        const priority = available.some((candidate) => candidate.priority);
+        const candidates = priority ? available.filter((item) => item.priority) : available;
+        const caller = callers.find((owner) => candidates.some((item) => item.caller === owner));
+        const item = candidates.find((candidate) => candidate.caller === caller);
         if (!item) {
           const next = Math.min(...queue.map(readyAt));
           // Reconsider newly queued protective writes at least every 100 ms.
@@ -56,6 +62,8 @@ export function createVstEndpointPacer({
           continue;
         }
         queue.splice(queue.indexOf(item), 1);
+        callers.splice(callers.indexOf(item.caller), 1);
+        if (queue.some((pending) => pending.caller === item.caller)) callers.push(item.caller);
         const start = now();
         globalNext = start + 300; // at most four starts in any one-second window
         endpointNext.set(item.key, start + (item.fastRead ? 600 : 1_100));
@@ -65,18 +73,20 @@ export function createVstEndpointPacer({
       }
     } catch (error) {
       for (const item of queue.splice(0)) item.reject(error);
+      callers.length = 0;
     } finally {
       draining = false;
     }
   }
   return Object.freeze({
-    waitForSlot({ method, endpoint, priority = false } = {}) {
+    waitForSlot({ method, endpoint, priority = false, caller = null } = {}) {
       const fastRead = method === "GET" && READ_ENDPOINTS.has(endpoint);
       // Unknown callers retain the legacy shared conservative lane.
       const key = fastRead ? `${method} ${endpoint}` : "conservative";
       return new Promise((resolve, reject) => {
+        if (!callers.includes(caller)) callers.push(caller);
         queue.push({ key, fastRead, mutation: method !== "GET",
-          priority: priority === true, resolve, reject });
+          priority: priority === true, caller, resolve, reject });
         void drain();
       });
     },

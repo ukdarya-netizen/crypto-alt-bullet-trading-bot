@@ -69,3 +69,47 @@ test("nonfinite clock rejects requests rather than bypassing pacing", async () =
   const pacer = createVstEndpointPacer({ clock: () => NaN, sleep: async () => {} });
   await assert.rejects(pacer.waitForSlot({ method: "GET", endpoint: POSITIONS }), /clock/);
 });
+
+test("round-robin skips temporarily ineligible endpoints without losing the waiting caller's turn", async () => {
+  const { pacer } = fixture();
+  const a = {}, b = {}, c = {};
+  await pacer.waitForSlot({ method: "GET", endpoint: BALANCE, caller: a });
+  const starts = await Promise.all([
+    pacer.waitForSlot({ method: "GET", endpoint: BALANCE, caller: b }),
+    pacer.waitForSlot({ method: "GET", endpoint: POSITIONS, caller: a }),
+    pacer.waitForSlot({ method: "GET", endpoint: BALANCE, caller: c }),
+    pacer.waitForSlot({ method: "GET", endpoint: BALANCE, caller: a }),
+  ]);
+  assert.deepEqual(starts, [1600, 1300, 2200, 2800]);
+});
+
+test("conservative unknown reads remain fair across clients without relaxing their shared floor", async () => {
+  const { pacer } = fixture();
+  const noisy = {}, quiet = {};
+  const backlog = Array.from({ length: 40 }, () =>
+    pacer.waitForSlot({ method: "GET", endpoint: "/unknown", caller: noisy }));
+  const other = pacer.waitForSlot({ method: "GET", endpoint: "/another", caller: quiet });
+  const [starts, time] = await Promise.all([Promise.all(backlog), other]);
+  assert.equal(time, 3200, "at most one already-queued noisy turn before new caller");
+  const all = [...starts, time].sort((a, b) => a - b);
+  for (let i = 1; i < all.length; i++) assert.equal(all[i] - all[i - 1], 1100);
+});
+
+test("shared cooldown covers already-queued priority writes and retains their order and read progress", async () => {
+  const { pacer } = fixture();
+  const a = {}, b = {}, reader = {};
+  await pacer.waitForSlot({ method: "POST", endpoint: MARGIN, caller: a });
+  const first = pacer.waitForSlot({ method: "POST", endpoint: MARGIN, caller: a, priority: true });
+  const second = pacer.waitForSlot({ method: "DELETE", endpoint: MARGIN, caller: b, priority: true });
+  const reads = Array.from({ length: 12 }, () =>
+    pacer.waitForSlot({ method: "GET", endpoint: POSITIONS, caller: reader }));
+  pacer.deferFor(5000);
+  const [one, two, starts] = await Promise.all([first, second, Promise.all(reads)]);
+  assert.ok(one >= 6000);
+  assert.ok(two - one >= 1100 && two - one <= 1400,
+    "next write respects its floor and the intervening read's global slot");
+  assert.ok(starts.every(time => time >= 6000));
+  assert.ok(starts.some(time => time > one && time < two),
+    "readers still progress while the global write floor is active");
+  assert.ok(starts.some(time => time > two));
+});

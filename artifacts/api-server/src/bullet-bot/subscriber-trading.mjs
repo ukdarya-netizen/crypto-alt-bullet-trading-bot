@@ -13,7 +13,7 @@
 // (stop-loss, take, closes) until they are closed, then the worker stops.
 // Phase 1: VST demo accounts only. Mainnet stays disabled.
 import { createSubscriberSchemaPool } from "@workspace/db";
-import { createBingXLiveApi, createBingXOutboundPacer } from "./bingx-live-api.mjs";
+import { createBingXLiveApi } from "./bingx-live-api.mjs";
 import { createVstBroker } from "./vst-broker.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstWorker } from "./vst-worker.mjs";
@@ -172,7 +172,6 @@ export function createSubscriberTradingManager({
     const api = createBingXLiveApi({
       environment: "vst",
       credentials: () => credentials,
-      requestPacer: createBingXOutboundPacer(),
       writePermission: ({ method, path }) => method !== "GET" && VST_WRITE_PATHS.has(path),
       positionProfile,
     });

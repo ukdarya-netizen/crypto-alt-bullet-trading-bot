@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createBingXLiveApi, createBingXOutboundPacer } from "../../bingx-live-api.mjs";
+import { createVstEndpointPacer } from "../../vst-endpoint-pacer.mjs";
 
 export const EPOCH = Date.parse("2026-10-24T00:00:00Z");
 export const ORDER = "/openApi/swap/v2/trade/order";
@@ -9,7 +10,9 @@ export const BALANCE = "/openApi/swap/v3/user/balance";
 // No wall-clock sleeps, environment credentials, sockets or runtime imports.
 // Advance only after all runnable promise continuations have settled, so a
 // selected caller really starts transport before the next simulated slot.
-export function mixedLoadHarness({ ambiguous = [], staleQuote = false } = {}) {
+export function mixedLoadHarness({
+  ambiguous = [], staleQuote = false, endpointPacing = false, isolateAccounts = false,
+} = {}) {
   let now = EPOCH;
   const timers = [];
   const context = new AsyncLocalStorage();
@@ -42,13 +45,23 @@ export function mixedLoadHarness({ ambiguous = [], staleQuote = false } = {}) {
     commission: "-0.01", currency: "USDT", commissionAsset: "VST",
     realisedPNL: "0", clientOrderID: "",
   };
+  const accountStates = new Map();
+  function stateFor(role) {
+    if (!isolateAccounts) return { positions, orders };
+    if (!accountStates.has(role)) accountStates.set(role, structuredClone({ positions, orders }));
+    return accountStates.get(role);
+  }
   const sleep = ms => new Promise(resolve => timers.push({ at: now + ms, resolve }));
-  const pacer = createBingXOutboundPacer({ clock: () => now, sleep });
+  const pacer = (endpointPacing ? createVstEndpointPacer : createBingXOutboundPacer)({
+    clock: () => now, sleep,
+  });
   const hooks = { onPriority: null, rateLimit: null };
   const requestPacer = {
     async waitForSlot(options = {}) {
       const row = {
         role: context.getStore(), priority: options.priority === true, queuedAt: now,
+        caller: options.caller,
+        method: options.method, endpoint: options.endpoint,
       };
       reservations.push(row);
       if (row.priority) await hooks.onPriority?.(row);
@@ -68,11 +81,13 @@ export function mixedLoadHarness({ ambiguous = [], staleQuote = false } = {}) {
     const url = new URL(input);
     assert.equal(url.origin, "https://open-api-vst.bingx.com");
     if (url.searchParams.has("signature")) {
-      assert.equal(options.headers["X-BX-APIKEY"], "local-test-key");
+      assert.equal(options.headers["X-BX-APIKEY"],
+        endpointPacing ? `local-test-key-${context.getStore()}` : "local-test-key");
       assert.equal(Number(url.searchParams.get("timestamp")), now,
         "signature timestamp must be acquired at transport, not while queued");
     }
     const role = context.getStore();
+    const { positions, orders } = stateFor(role);
     const symbol = url.searchParams.get("symbol");
     requests.push({ role, at: now, path: url.pathname, method: options.method,
       symbol, params: Object.fromEntries(url.searchParams) });
@@ -184,7 +199,10 @@ export function mixedLoadHarness({ ambiguous = [], staleQuote = false } = {}) {
     if (!apis.has(role)) apis.set(role, createBingXLiveApi({
       environment: "vst", fetchImpl: guardedFetch, clock: () => now, sleep, requestPacer,
       random: () => 0,
-      credentials: () => ({ key: "local-test-key", secret: "local-test-secret" }),
+      credentials: () => ({
+        key: endpointPacing ? `local-test-key-${role}` : "local-test-key",
+        secret: "local-test-secret",
+      }),
       writePermission: () => true,
     }));
     return apis.get(role);
@@ -211,6 +229,7 @@ export function mixedLoadHarness({ ambiguous = [], staleQuote = false } = {}) {
   }
   return {
     api, run, drain, requests, reservations, cooldowns, hooks, positions, orders,
+    stateFor,
     restartClient: role => apis.delete(role),
     clock: () => now,
   };

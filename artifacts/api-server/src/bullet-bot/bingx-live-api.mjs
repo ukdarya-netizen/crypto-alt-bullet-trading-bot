@@ -40,6 +40,7 @@ const VST_TICKER_PATH = "/openApi/swap/v2/quote/ticker";
 const LAST_PRICE_MIN_GAP_MS = 2_000;
 const VST_BOOK_TICKER_PATH = "/openApi/swap/v2/quote/bookTicker";
 const VST_PRE_SIGN_MAX_PACING_DELAY_MS = 2_000;
+const VST_PROTECTIVE_PRE_SIGN_REFRESHES = 3;
 const VST_ORDER_HISTORY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const VST_RUNNER_FILL_HISTORY_MAX_AGE_MS = 23 * 60 * 60 * 1000;
 const VST_SIGNAL_MAX_AGE_MS = 10 * 60 * 1000;
@@ -644,6 +645,9 @@ export function createBingXLiveApi({
   }
   if (typeof random !== "function") throw new TypeError("random must be a function");
 
+  // All operations on one client share its fair-queue identity, including
+  // public quote reads. No credentials or mutable trading evidence are stored.
+  const pacingCaller = Object.freeze({});
   const submittedClientOrderIds = new Set();
   const submittedMarginOperationIds = new Set();
   const submittedVstStopIntents = new Set();
@@ -923,40 +927,43 @@ export function createBingXLiveApi({
       attempt < (write ? 1 : MAX_TIMESTAMP_INVALID_GET_ATTEMPTS);
       attempt += 1) {
       let beforeSignCompletedAt;
-      if (beforeSign !== undefined) {
-        if (typeof beforeSign !== "function") {
-          throw new TypeError("beforeSign must be a function");
+      const checkBeforeSign = async () => {
+        if (beforeSign !== undefined) {
+          if (typeof beforeSign !== "function") {
+            throw new TypeError("beforeSign must be a function");
+          }
+          try {
+            await beforeSign();
+          } catch (error) {
+            const wrapped = new BingXLiveApiError("BingX final pre-sign check failed", {
+              transportStage: "pre_transport",
+              ...(error instanceof BingXLiveApiError ? {
+                ...(error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}),
+                ...(error.code !== undefined ? { code: error.code } : {}),
+                ...(typeof error.exchangeMessage === "string" &&
+                  (Number(error.code) === 109400 &&
+                   error.exchangeMessage.trim().toLowerCase() === "timestamp is invalid")
+                  ? { exchangeMessage: error.exchangeMessage.slice(0, 500) } : {}),
+                ...(typeof error.endpoint === "string" ? { endpoint: error.endpoint } : {}),
+                ...(typeof error.method === "string" ? { method: error.method } : {}),
+              } : {}),
+              ...(error?.preSignReason === "final_quote_unavailable_or_stale" &&
+                error instanceof BingXLiveApiError
+                ? {
+                    ...(error.code !== undefined ? { code: error.code } : {}),
+                    ...(typeof error.exchangeMessage === "string"
+                      ? { exchangeMessage: error.exchangeMessage.slice(0, 500) } : {}),
+                  } : {}),
+              ...(exposeVstPreSignReason &&
+                ALLOWED_VST_PRE_SIGN_REASONS.has(error?.preSignReason)
+                ? { preSignReason: error.preSignReason } : {}),
+            });
+            throw wrapped;
+          }
+          beforeSignCompletedAt = Number(clock());
         }
-        try {
-          await beforeSign();
-        } catch (error) {
-          const wrapped = new BingXLiveApiError("BingX final pre-sign check failed", {
-            transportStage: "pre_transport",
-            ...(error instanceof BingXLiveApiError ? {
-              ...(error.httpStatus !== undefined ? { httpStatus: error.httpStatus } : {}),
-              ...(error.code !== undefined ? { code: error.code } : {}),
-              ...(typeof error.exchangeMessage === "string" &&
-                (Number(error.code) === 109400 &&
-                 error.exchangeMessage.trim().toLowerCase() === "timestamp is invalid")
-                ? { exchangeMessage: error.exchangeMessage.slice(0, 500) } : {}),
-              ...(typeof error.endpoint === "string" ? { endpoint: error.endpoint } : {}),
-              ...(typeof error.method === "string" ? { method: error.method } : {}),
-            } : {}),
-            ...(error?.preSignReason === "final_quote_unavailable_or_stale" &&
-              error instanceof BingXLiveApiError
-              ? {
-                  ...(error.code !== undefined ? { code: error.code } : {}),
-                  ...(typeof error.exchangeMessage === "string"
-                    ? { exchangeMessage: error.exchangeMessage.slice(0, 500) } : {}),
-                } : {}),
-            ...(exposeVstPreSignReason &&
-              ALLOWED_VST_PRE_SIGN_REASONS.has(error?.preSignReason)
-              ? { preSignReason: error.preSignReason } : {}),
-          });
-          throw wrapped;
-        }
-        beforeSignCompletedAt = Number(clock());
-      }
+      };
+      if (beforeSign !== undefined) await checkBeforeSign();
 
       // Any nested pre-sign reads use the same pacer independently. Reserve
       // the actual request's slot only after those reads, then timestamp and
@@ -969,14 +976,31 @@ export function createBingXLiveApi({
       let query;
       let signature;
       try {
+      for (let refreshes = 0; ; refreshes++) {
       await outboundPacer.waitForSlot({
-        method, endpoint: path,
+        method, endpoint: path, caller: pacingCaller,
         priority: environment === "vst" && write && beforeSignCompletedAt !== undefined,
       });
       if (environment === "vst" && beforeSignCompletedAt !== undefined) {
         const pacingDelay = Number(clock()) - beforeSignCompletedAt;
         if (!Number.isFinite(pacingDelay) || pacingDelay < 0 ||
             pacingDelay > VST_PRE_SIGN_MAX_PACING_DELAY_MS) {
+          // This request has not been signed or handed to transport. Refresh
+          // protective evidence, then acquire another slot, instead of losing
+          // the third concurrent protection to the shared 1.1 s write floor.
+          // Entries retain their fail-closed freshness policy. Never repeat
+          // beforeTransport, journal reservation, or a transported mutation.
+          const protectiveWrite = write && (method === "DELETE" ||
+            path === PATH.positionMargin || path === PATH.order && params.side === "SELL");
+          if (protectiveWrite && Number.isFinite(pacingDelay) && pacingDelay >= 0 &&
+              refreshes < VST_PROTECTIVE_PRE_SIGN_REFRESHES) {
+            if (!(await writePermission({ method, path }))) {
+              throw new BingXLiveApiError("BingX live writes are disabled: explicit permission was not granted",
+                { transportStage: "pre_transport" });
+            }
+            await checkBeforeSign();
+            continue;
+          }
           throw new BingXLiveApiError(
             "VST final pre-sign checks expired while waiting for request pacing",
             {
@@ -985,6 +1009,8 @@ export function createBingXLiveApi({
             },
           );
         }
+      }
+      break;
       }
       const values = {};
       for (const [name, value] of Object.entries(params)) {
@@ -2931,7 +2957,9 @@ export function createBingXLiveApi({
     // ahead of time-sensitive management. The outer mark pair owns retries.
     const maxAttempts = quotePath === VST_BOOK_TICKER_PATH ? 1 : MAX_RETRYABLE_GET_ATTEMPTS;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      await outboundPacer.waitForSlot();
+      await outboundPacer.waitForSlot({
+        method: "GET", endpoint: quotePath, caller: pacingCaller,
+      });
       requestStartedAt = Number(clock());
       try {
         response = await fetchImpl(

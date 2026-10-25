@@ -6,7 +6,7 @@ import { vstPerformanceRow } from "../lib/vst-performance";
 // @ts-expect-error JavaScript module of the bot.
 import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPermissions, subscriberKeysConfigured } from "../bullet-bot/subscriber-keys.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { createBingXLiveApi, createBingXOutboundPacer } from "../bullet-bot/bingx-live-api.mjs";
+import { createBingXLiveApi } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
 import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema } from "../bullet-bot/subscriber-trading.mjs";
 // @ts-expect-error JavaScript module of the bot.
@@ -161,7 +161,6 @@ router.post("/me/api-key", async (req, res) => {
   const api = createBingXLiveApi({
     environment: "vst",
     credentials: () => ({ key: apiKey, secret: apiSecret }),
-    requestPacer: createBingXOutboundPacer(),
     writePermission: () => false,
   });
   let balance: unknown = null;
