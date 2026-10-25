@@ -1488,7 +1488,8 @@ export function createVstWorker({
   const fullTakePosition = (record) =>
     positionStrategy(record.snapshot ?? record, strategyDefaults).exitStrategy === FULL_TAKE_5PCT;
   const nativeTakeProfit =
-    typeof broker.createNativeTakeProfitManager === "function"
+    typeof broker.createNativeTakeProfitManager === "function" &&
+    (exitStrategy === FULL_TAKE_5PCT || typeof store.listNativeTakeIntents === "function")
     ? broker.createNativeTakeProfitManager(store, { legacyExitStrategy: exitStrategy }) : null;
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
@@ -6285,7 +6286,8 @@ export function createVstWorker({
       liquidationPriceAfter: protection.liquidationPrice,
       protectionVerified: riskSafe,
     };
-    const isImpulse = position.patternId === "impulse_buy" && strategyAuthority !== "source";
+    const isImpulse = position.patternId === "impulse_buy" &&
+      positionStrategy(position, strategyDefaults).strategyAuthority !== "source";
     return store.commitVerifiedIntent({
       sourceSignalId: intent.sourceSignalId,
       clientOrderId: intent.clientOrderId,
@@ -11361,7 +11363,7 @@ export function createVstWorker({
   ) {
     if (nativeTakeProfit?.blocksPosition(record.sourceSignalId))
       return { kind: "waiting", reason: "native_take_fill_reconciliation_pending" };
-    let state = pinPositionStrategy(record.snapshot, strategyDefaults);
+    let state = record.snapshot;
     const { strategyAuthority, exitStrategy } = positionStrategy(state, strategyDefaults);
     // This is an explicitly approved executor rule, not a fabricated source
     // instruction. The full-exit lane still verifies exact own fills, account,

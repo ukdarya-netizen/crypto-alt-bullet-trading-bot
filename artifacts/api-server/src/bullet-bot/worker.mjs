@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { capturePositionStrategy, positionStrategy, pinPositionStrategy } from "./position-strategy.mjs";
 import { SIGNAL_TTL_MS, validateSignal } from "./contract.mjs";
 import { initialPosition, evaluatePosition, isPaperAllocationFeasible } from "./engine.mjs";
 import { startScenarios, observeScenarios } from "./scenario-model.mjs";
@@ -138,6 +139,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
   if (!["policy", "source"].includes(strategyAuthority)) {
     throw new TypeError("PAPER strategyAuthority must be source or policy");
   }
+  const strategyDefaults = capturePositionStrategy({ exitStrategy, strategyAuthority });
   if (!["paper", "live"].includes(mode)) throw new Error("Invalid execution mode");
   // The exchange adapter is implemented, but live exit reconciliation is not
   // independently proven. Never open a real position that this worker cannot
@@ -256,7 +258,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
         // Entry is based on the validated ask, never on premiumIndex. A missing
         // mark is exposed as incomplete rather than substituted with lastPrice.
       }
-      const position = initialPosition({
+      const position = pinPositionStrategy(initialPosition({
         ...signal, stopLoss: validated?.stopLoss ?? signal.stopLoss,
       }, {
         price,
@@ -269,7 +271,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
         quantityPrecisionSource: Number.isInteger(validated?.instrument?.quantityPrecision)
           ? "bingx_contract_metadata"
           : "conservative_default",
-      });
+      }), strategyDefaults);
       if (strategyAuthority === "source") {
         Object.assign(position, { strategyAuthority, coreQty: position.remainingQty,
           coreOpen: true, runnerQty: 0, runnerOpen: false, runnerStopPrice: null });
@@ -421,12 +423,12 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
       await store.setSignalStatus(id, "error", "entry_not_confirmed_or_stop_missing");
       return;
     }
-    const position = initialPosition(signal, {
+    const position = pinPositionStrategy(initialPosition(signal, {
       price: Number(fill.avgPrice),
       quantity: Number(fill.size),
       at: new Date(clock()).toISOString(),
       mode,
-    });
+    }), strategyDefaults);
     if (strategyAuthority === "source") {
       Object.assign(position, { strategyAuthority, coreQty: position.remainingQty,
         coreOpen: true, runnerQty: 0, runnerOpen: false, runnerStopPrice: null });
@@ -486,6 +488,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
     directCommand = null,
   ) {
     const position = record.snapshot;
+    const { strategyAuthority, exitStrategy } = positionStrategy(position, strategyDefaults);
     if (!sourceExitEvidence &&
         mode === "paper" &&
         typeof store.listPendingSourceExitRequests === "function") {
@@ -904,6 +907,7 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
   }
 
   async function observeSourcePosition(position, source) {
+    const { strategyAuthority } = positionStrategy(position, strategyDefaults);
     const sourceUpdatedAtMs = validSourceTimestamp(source.sourceUpdatedAt);
     if ((sourceUpdatedAtMs === null && source.sourceAction !== "unknown") ||
         sourceUpdatedAtMs > clock()) return false;

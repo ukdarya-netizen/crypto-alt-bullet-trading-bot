@@ -2,10 +2,10 @@
 // Capture before entry transport and keep the same immutable settings through
 // reconciliation, position management and restarts.
 export function capturePositionStrategy({ exitStrategy, strategyAuthority }) {
-  if (!["source", "full_take_5pct"].includes(exitStrategy) ||
-      !["source", "policy"].includes(strategyAuthority)) {
-    throw new TypeError("Unsupported executable position strategy");
-  }
+  if (!["source", "full_take_5pct"].includes(exitStrategy))
+    throw new TypeError("Invalid exit strategy");
+  if (!["source", "policy"].includes(strategyAuthority))
+    throw new TypeError("strategyAuthority must be source or policy");
   return Object.freeze({ version: 1, exitStrategy, strategyAuthority });
 }
 
