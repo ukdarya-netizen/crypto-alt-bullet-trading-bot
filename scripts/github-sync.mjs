@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 const DEFAULT_REMOTE = "https://github.replit.internal/ukdarya-netizen/crypto-alt-bullet-trading-bot.git";
 const ORIGINAL_EXPORT = "140e4979740781a4ce8b27bd4f307ea313c67417";
 const MAX_FILE = 5 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const hash = (data) => crypto.createHash("sha256").update(data).digest("hex");
 const fingerprint = (entry) => entry ? `${entry.mode}:${hash(entry.data)}` : null;
 const same = (a, b) => fingerprint(a) === fingerprint(b);
@@ -27,7 +28,11 @@ export function permitted(name) {
 function validate(name, entry) {
   if (!permitted(name)) throw new Error(`Excluded path in source repository: ${name}`);
   if (!["100644", "100755"].includes(entry.mode)) throw new Error(`Non-regular file: ${name}`);
-  if (entry.data.length > MAX_FILE || entry.data.includes(0)) throw new Error(`Binary/oversized file: ${name}`);
+  const isPng = /\.png$/i.test(name) &&
+    entry.data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE);
+  if (entry.data.length > MAX_FILE || (entry.data.includes(0) && !isPng)) {
+    throw new Error(`Binary/oversized file: ${name}`);
+  }
   const text = entry.data.toString("utf8");
   if (/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})|sk_live_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|[0-9]{8,12}:[A-Za-z0-9_-]{30,}/.test(text)) {
     throw new Error(`Possible credential in ${name}; synchronization paused`);

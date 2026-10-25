@@ -112,6 +112,52 @@ test("rejects symlinks (including dangling), binary files and recognizable crede
   await assert.rejects(f.sync.tick({ quietMs: 0 }), /credential/);
 });
 
+const png = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+  "base64",
+);
+
+test("exchanges PNG assets in both directions without changing their bytes", async (t) => {
+  const f = fixture(t);
+  const localName = "artifacts/app/public/local.png";
+  const remoteName = "artifacts/app/public/apple-touch-icon.png";
+  fs.mkdirSync(path.dirname(path.join(f.local, localName)), { recursive: true });
+  fs.writeFileSync(path.join(f.local, localName), png);
+  f.remoteEdit(remoteName, png);
+  await f.sync.tick({ quietMs: 0 });
+  assert.equal(f.status().state, "synced");
+  assert.deepEqual(fs.readFileSync(path.join(f.local, remoteName)), png);
+  assert.equal(
+    f.git(f.upstream, "rev-parse", `main:${localName}`),
+    f.git(f.local, "hash-object", localName),
+  );
+  await f.sync.tick({ quietMs: 0 });
+  assert.equal(f.status().uploaded, 0);
+  assert.equal(f.status().downloaded, 0);
+});
+
+test("PNG exceptions require both a matching extension and a PNG signature", async (t) => {
+  const f = fixture(t);
+  fs.writeFileSync(path.join(f.local, "fake.png"), Buffer.from([0, 1, 2]));
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /Binary/);
+  fs.rmSync(path.join(f.local, "fake.png"));
+  f.remoteEdit("not-a-png.bin", png);
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /Binary/);
+  assert.equal(fs.existsSync(path.join(f.local, "not-a-png.bin")), false);
+});
+
+test("PNG assets retain the size limit and recognizable credential checks", async (t) => {
+  const f = fixture(t);
+  const oversized = Buffer.alloc(5 * 1024 * 1024 + 1);
+  png.copy(oversized);
+  fs.writeFileSync(path.join(f.local, "oversized.png"), oversized);
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /Oversized/);
+  fs.rmSync(path.join(f.local, "oversized.png"));
+  f.remoteEdit("credential.png", Buffer.concat([png, Buffer.from("ghp_" + "x".repeat(40))]));
+  await assert.rejects(f.sync.tick({ quietMs: 0 }), /credential/);
+  assert.equal(fs.existsSync(path.join(f.local, "credential.png")), false);
+});
+
 test("rejects unsafe remote paths and never imports them", async (t) => {
   const f = fixture(t);
   f.remoteEdit("handoff/private.txt", "never import\n");
