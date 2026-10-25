@@ -8994,9 +8994,11 @@ function validTriggeredStopEvidence() {
   };
 }
 
-test("natural ordinary protective stop close is committed from verified child fill evidence", async () => {
+for (const patternId of ["balanced_grind", "neon_support_bounce", "stealth_accumulation", "future_pattern"]) {
+test(`natural ${patternId} protective stop close is committed from verified child fill evidence`, async () => {
   let observed;
   const fixture = triggeredStopFixture({
+    patternId,
     observeTriggeredStop: async (request) => {
       observed = request;
       return validTriggeredStopEvidence();
@@ -9031,6 +9033,7 @@ test("natural ordinary protective stop close is committed from verified child fi
   assert.equal(fixture.store.data.intents[0].request.operation, "observe_triggered_stop");
   assert.equal(fixture.store.data.events[0][1], "vst_triggered_stop_verified");
 });
+}
 
 test("triggered stop child fill mismatch remains unknown and cannot close policy", async () => {
   const evidence = validTriggeredStopEvidence();

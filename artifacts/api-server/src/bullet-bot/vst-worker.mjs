@@ -1714,6 +1714,20 @@ export function createVstWorker({
         externalFlatObservations.delete(record.sourceSignalId);
         continue;
       }
+      // A flat account does not identify the cause of closure. First try the
+      // exact protective order and its child fills, including for newer
+      // ordinary patterns (Neon, Stealth, etc.). This path is read-only on
+      // the exchange and commits only independently verified stop evidence.
+      if (state.patternId !== "impulse_buy" && state.coreOpen === true &&
+          typeof broker.observeTriggeredStop === "function" &&
+          typeof state.coreStopOrderId === "string" &&
+          Number(state.remainingQty) > 0) {
+        const stopped = await reconcileTriggeredStop(record, state);
+        if (stopped?.operation === "observe_triggered_stop") {
+          externalFlatObservations.delete(record.sourceSignalId);
+          return { ...stopped, sourceSignalId: record.sourceSignalId, symbol: record.symbol };
+        }
+      }
       const prior = externalFlatObservations.get(record.sourceSignalId);
       const seen = prior ? { ...prior, last: now, count: prior.count + 1 } : { first: now, last: now, count: 1 };
       externalFlatObservations.set(record.sourceSignalId, seen);
@@ -7608,8 +7622,6 @@ export function createVstWorker({
       return attachVstResultDiagnostic({ kind: "unknown", reason }, diagnostic);
     };
     if (state.patternId === "impulse_buy" ||
-        !new Set(["liquidation_cascade", "balanced_grind", "price_led_momentum"])
-          .has(state.patternId) ||
         typeof broker.observeTriggeredStop !== "function" ||
         typeof state.exchangePositionId !== "string" ||
         typeof state.coreStopOrderId !== "string" ||
