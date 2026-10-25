@@ -1892,7 +1892,7 @@ export function createBingXLiveApi({
       ...(onAttemptStarted !== undefined ? { beforeTransport: onAttemptStarted } : {}),
       ...(beforeSign !== undefined ? { beforeSign } : {}),
     });
-    orderIdentifierFrom(result, "submitted order ID");
+    exactOrderIdentifierFrom(result, "submitted order ID");
     return result;
   }
 

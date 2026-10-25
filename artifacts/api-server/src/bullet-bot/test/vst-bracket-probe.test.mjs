@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runControlledVstBracketProbe } from "../vst-bracket-probe.mjs";
+import { inspectVstBracketCohort, runControlledVstBracketProbe } from "../vst-bracket-probe.mjs";
 import { createBingXLiveApi } from "../bingx-live-api.mjs";
 
 function fixture({ entryAmbiguous = false, takeAmbiguous = false,
@@ -68,7 +68,7 @@ function fixture({ entryAmbiguous = false, takeAmbiguous = false,
       assert.equal(params.type, "TAKE_PROFIT_MARKET");
       assert.equal(params.closePosition, "true");
       rows.set("102", { ...params, orderId: "102", origQty: params.quantity,
-        status: "NEW" });
+        status: "NEW", positionID: "201" });
       if (takeAmbiguous) throw Error("take_ack_lost");
       return { order: { orderId: "102" } };
     },
@@ -149,4 +149,49 @@ test("controlled bracket probe cannot be invoked on mainnet", async () => {
   await assert.rejects(async () => api.runControlledVstBracketProbe({}),
     /VST.*unavailable|requires VST|only.*VST|unavailable outside VST/);
   assert.equal(requests, 0);
+});
+
+function nativeConditionalCohort() {
+  const expected = { positionId: "201", entryOrderId: "101", stopOrderId: "103",
+    takeOrderId: "102", quantity: "0.0011", stopLoss: "78595.4", takePrice: "84208.2" };
+  const common = { symbol: "BTC-USDT", side: "SELL", positionSide: "LONG",
+    status: "NEW", origQty: expected.quantity, positionID: "201", workingType: "MARK_PRICE" };
+  const openStop = { ...common, orderId: "103", type: "STOP_MARKET", stopPrice: expected.stopLoss };
+  const openTake = { ...common, orderId: "102", type: "TAKE_PROFIT_MARKET", stopPrice: expected.takePrice };
+  return { expected, orders: [openTake, openStop], stop: { ...openStop, positionID: 0 },
+    position: { id: "201", quantity: expected.quantity },
+    take: { ...common, orderId: "102", positionID: 0, type: "LIMIT", price: "0.0",
+      stopPrice: "", executedQty: "0.0000", workingType: "CONTRACT_PRICE",
+      takeProfit: { type: "TAKE_PROFIT_MARKET", stopPrice: 0, workingType: "CONTRACT_PRICE" } } };
+}
+
+test("native TP placeholder is corroborated only by the exact owned active TAKE order", () => {
+  const cohort = nativeConditionalCohort();
+  const result = inspectVstBracketCohort(cohort);
+  assert.equal(result.coexistenceVerified, true);
+  assert.equal(result.takeQuerySource, "corroborated_conditional_placeholder");
+  assert.equal(result.triggerBasisVerified, false, "do not hide the real native trigger-basis discrepancy");
+  assert.deepEqual(result.triggerBasis, {
+    submitted: "CONTRACT_PRICE", openOrders: "MARK_PRICE", exactQuery: "CONTRACT_PRICE",
+  });
+});
+
+test("corroboration never accepts an ordinary LIMIT, wrong target, volume, ID, side, or owner", () => {
+  for (const mutate of [
+    (c) => { c.take.price = "84208.2"; },
+    (c) => { c.take.takeProfit.type = ""; },
+    (c) => { c.take.stopPrice = "1"; },
+    (c) => { c.take.orderId = "999"; },
+    (c) => { c.take.origQty = "0.0010"; },
+    (c) => { c.take.side = "BUY"; },
+    (c) => { c.take.status = "CANCELLED"; },
+    (c) => { c.orders[0].stopPrice = "84208.3"; },
+    (c) => { c.orders[0].positionID = "999"; },
+    (c) => { c.orders[0].origQty = "0.0010"; },
+    (c) => { c.orders.pop(); },
+  ]) {
+    const cohort = nativeConditionalCohort();
+    mutate(cohort);
+    assert.equal(inspectVstBracketCohort(cohort).coexistenceVerified, false);
+  }
 });

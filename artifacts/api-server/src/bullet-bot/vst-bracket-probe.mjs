@@ -24,6 +24,67 @@ function sameOrder(row, id, type, quantity, price) {
     Number(row.stopPrice) === Number(price);
 }
 
+// Corroborate the actual open-order contract; do not globally rewrite LIMIT
+// rows into takes. BingX's exact-ID query may return a conditional placeholder
+// with LIMIT/zero price, nested takeProfit metadata and positionID:0.
+export function inspectVstBracketCohort({ orders, stop, take, position, expected }) {
+  const matches = (...args) => {
+    try { return sameOrder(...args); } catch { return false; }
+  };
+  const owns = (row) => {
+    const pid = positionId(row);
+    if (exactId(pid)) return pid === expected.positionId;
+    return (row.mainOrderId ?? row.parentOrderId) === expected.entryOrderId;
+  };
+  const openStop = orders.find((row) => matches(row, expected.stopOrderId,
+    "STOP_MARKET", expected.quantity, expected.stopLoss) && owns(row));
+  const openTake = orders.find((row) => matches(row, expected.takeOrderId,
+    "TAKE_PROFIT_MARKET", expected.quantity, expected.takePrice) && owns(row));
+  let conditionalPlaceholder = false;
+  try {
+    conditionalPlaceholder = Boolean(openTake &&
+      orderId(take) === expected.takeOrderId &&
+      take.symbol === NATIVE && take.side === "SELL" && take.positionSide === "LONG" &&
+      take.status === "NEW" && Number(take.origQty ?? take.quantity) === Number(expected.quantity) &&
+      take.type === "LIMIT" && Number(take.price) === 0 &&
+      (take.stopPrice === "" || take.stopPrice === null || take.stopPrice === undefined) &&
+      take.takeProfit?.type === "TAKE_PROFIT_MARKET" &&
+      take.takeProfit.workingType === (expected.takeWorkingType ?? "CONTRACT_PRICE") &&
+      take.workingType === take.takeProfit.workingType &&
+      Number(take.positionId ?? take.positionID) === 0 &&
+      Number(take.executedQty) === 0);
+  } catch { /* malformed IDs never qualify as conditional placeholders */ }
+  const checks = {
+    position: Boolean(position && position.id === expected.positionId &&
+      Number(position.quantity) === Number(expected.quantity)),
+    count: orders.length === 2,
+    stopQuery: matches(stop, expected.stopOrderId, "STOP_MARKET", expected.quantity, expected.stopLoss),
+    takeQuery: matches(take, expected.takeOrderId, "TAKE_PROFIT_MARKET",
+      expected.quantity, expected.takePrice) || conditionalPlaceholder,
+    stopOpen: Boolean(openStop),
+    takeOpen: Boolean(openTake),
+    noForeign: orders.every((row) => {
+      try { return [expected.stopOrderId, expected.takeOrderId].includes(orderId(row)); }
+      catch { return false; }
+    }),
+  };
+  const triggerBasis = {
+    submitted: expected.takeWorkingType ?? "CONTRACT_PRICE",
+    openOrders: openTake?.workingType ?? null,
+    exactQuery: take?.workingType ?? null,
+  };
+  return {
+    checks,
+    coexistenceVerified: Object.values(checks).every(Boolean),
+    takeQuerySource: conditionalPlaceholder ? "corroborated_conditional_placeholder" : "typed_order",
+    triggerBasis,
+    // Existence and full-quantity ownership are not proof of a disputed
+    // trigger basis. Keep that separate; never silently normalize the flags.
+    triggerBasisVerified: Object.values(triggerBasis).every((value) =>
+      value === triggerBasis.submitted),
+  };
+}
+
 export async function runControlledVstBracketProbe({
   api, submitTake, cancelProtective, save, state = null, clock = Date.now,
   makeId, closePolicy, readDelay = () => wait(300),
@@ -190,28 +251,20 @@ export async function runControlledVstBracketProbe({
         api.queryOrder(SYMBOL, { orderId: state.stopOrderId }),
         api.queryOrder(SYMBOL, { orderId: state.takeOrderId }), readPosition(),
       ]);
-      const matches = (...args) => {
-        try { return sameOrder(...args); } catch { return false; }
-      };
-      const checks = {
-        position: Boolean(current),
-        count: orders.length === 2,
-        stopQuery: matches(stop, state.stopOrderId, "STOP_MARKET", state.quantity, state.stopLoss),
-        takeQuery: matches(take, state.takeOrderId, "TAKE_PROFIT_MARKET", state.quantity, state.takePrice),
-        stopOpen: orders.some((row) => matches(row, state.stopOrderId, "STOP_MARKET",
-          state.quantity, state.stopLoss)),
-        takeOpen: orders.some((row) => matches(row, state.takeOrderId, "TAKE_PROFIT_MARKET",
-          state.quantity, state.takePrice)),
-        noForeign: orders.every((row) => [state.stopOrderId, state.takeOrderId].includes(orderId(row))),
-      };
+      const currentPosition = current && { id: positionId(current), quantity: current.positionAmt };
+      const observation = inspectVstBracketCohort({
+        orders, stop, take, position: currentPosition, expected: state,
+      });
+      const { checks } = observation;
       // Persist both actual response cohorts before deciding; a later closed
       // history row cannot reconstruct a failed active-order observation.
       await record({ verificationReads: [...(state.verificationReads ?? []), {
-        at: new Date(clock()).toISOString(), attempt, checks, orders, stop, take,
-        position: current && { id: positionId(current), quantity: current.positionAmt },
+        at: new Date(clock()).toISOString(), attempt, ...observation, orders, stop, take,
+        position: currentPosition,
       }] });
       if (Object.values(checks).every(Boolean)) {
         await record({ phase: "dual_orders_verified", stop, take,
+          coexistenceVerified: true, triggerBasisVerified: observation.triggerBasisVerified,
           dualVerifiedAt: new Date(clock()).toISOString() });
         break;
       }
