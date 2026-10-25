@@ -73,6 +73,8 @@ const VST_CLOSE_REASON_LABELS: Record<string, string> = {
   protected_profit_floor: "Зафиксирована защищённая прибыль",
   breakeven_stop: "Сработал стоп в безубыток",
   runner_break_even_unavailable_at_or_below_entry: "Раннер закрыт: безубыток недостижим",
+  external_close_verified_flat: "Закрыта вне бота (на бирже позиции нет, проверено)",
+  fixed_price_take_profit_5pct: "Тейк +5%",
 };
 function vstCloseReasonLabel(reason: unknown, hasTriggeredStop: boolean): string {
   if (typeof reason === "string" && reason.trim()) {

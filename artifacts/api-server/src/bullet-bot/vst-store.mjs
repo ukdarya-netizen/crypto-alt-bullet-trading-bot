@@ -2641,6 +2641,76 @@ export function createVstStore(pool) {
     // An owner-attested resolution must instead include the worker's fresh,
     // exact-account VST flat/open-order check. Bot-submitted closes provide a
     // separate explicit verifiedExchangeFill proof.
+    // Automatic resolution of a position that is no longer on the exchange
+    // (closed by hand on BingX, liquidated, or closed by an order whose
+    // outcome the bot never saw). The worker calls this only after repeated
+    // fresh account reads over minutes showed the symbol flat with no open
+    // orders and no in-flight write. Status changes to closed; no exit price
+    // is invented (closeFill stays absent, the journal shows "—"). Unresolved
+    // intents of this signal are retired with the same proof, since nothing
+    // they could still do can change a flat symbol with no orders.
+    async closeVerifiedFlatPosition(sourceSignalId, { observation }) {
+      const signalId = requireString(sourceSignalId, "sourceSignalId");
+      requirePlainObject(observation, "observation");
+      return transaction(pool, async (client) => {
+        const existing = await client.query(
+          `SELECT source_signal_id, symbol, status, snapshot, updated_at
+           FROM vst_positions WHERE source_signal_id = $1 FOR UPDATE`,
+          [signalId],
+        );
+        const record = positionFromRow(existing.rows[0]);
+        if (!record || !["open", "closing", "unknown"].includes(record.status)) return null;
+        const snapshot = requirePlainObject(record.snapshot, "stored VST position snapshot");
+        if (snapshot.environment !== "vst" || snapshot.accountId !== observation.accountId ||
+            record.symbol !== observation.symbol) {
+          throw new Error("vst_external_close_observation_mismatch");
+        }
+        const closedAt = new Date().toISOString();
+        const closed = {
+          ...snapshot,
+          status: "closed",
+          closedAt,
+          closeReason: "external_close_verified_flat",
+          remainingQty: 0,
+          ...(typeof snapshot.coreQty === "number" ? { coreQty: 0 } : {}),
+          ...(typeof snapshot.runnerQty === "number" ? { runnerQty: 0 } : {}),
+          ...(typeof snapshot.coreOpen === "boolean" ? { coreOpen: false } : {}),
+          ...(typeof snapshot.runnerOpen === "boolean" ? { runnerOpen: false } : {}),
+          externalClose: { ...observation, previousStatus: record.status, resolvedAt: closedAt },
+        };
+        const positionResult = await client.query(
+          `UPDATE vst_positions SET status = 'closed', snapshot = $2::jsonb, updated_at = now()
+           WHERE source_signal_id = $1
+           RETURNING source_signal_id, symbol, status, snapshot, updated_at`,
+          [signalId, serialize(closed, "VST position")],
+        );
+        await client.query(
+          `UPDATE vst_signals SET status = 'closed', reason = 'external_close_verified_flat', updated_at = now()
+           WHERE source_signal_id = $1`,
+          [signalId],
+        );
+        const retired = await client.query(
+          `UPDATE vst_order_intents
+           SET state = 'failed',
+               outcome = COALESCE(outcome, '{}'::jsonb) || $2::jsonb,
+               updated_at = now()
+           WHERE source_signal_id = $1 AND state IN ('prepared', 'submitted', 'unknown')
+           RETURNING client_order_id`,
+          [signalId, serialize({ reason: "superseded_by_verified_flat_symbol", observedAt: observation.lastObservedAt },
+            "VST intent outcome")],
+        );
+        await client.query(
+          `INSERT INTO vst_events (source_signal_id, client_order_id, kind, detail)
+           VALUES ($1, NULL, 'vst_external_close_verified', $2::jsonb)`,
+          [signalId, serialize({
+            ...observation, previousStatus: record.status,
+            retiredIntents: retired.rows.map((row) => row.client_order_id),
+          }, "VST event detail")],
+        );
+        return positionFromRow(positionResult.rows[0]);
+      });
+    },
+
     async resolvePositionAsClosed(sourceSignalId, {
       fill, resolvedBy, note = null, exchangeFlatCheck = null,
       verifiedExchangeFill = false,

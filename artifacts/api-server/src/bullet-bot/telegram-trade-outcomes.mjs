@@ -19,6 +19,7 @@ export function vstTradeOutcome(event) {
   if (event.kind === "vst_worker_error" && detail.reason === "vst_order_rejected" &&
       detail.operation === "entry") return "not_opened";
   if (event.kind === "vst_position_management_quarantined") return "unmanaged";
+  if (event.kind === "vst_external_close_verified") return "closed_external";
   if (event.kind === "vst_full_take_close_delayed") return "take_delayed";
   if (event.kind === "vst_full_take_close_stuck") return "take_stuck";
   if (event.kind === "vst_triggered_stop_verified") return "stop";
@@ -43,6 +44,7 @@ export function vstTradeOutcome(event) {
   if (event.kind === "exchange_history_provenance") return "closed";
   if (event.kind === "source_exit_completed" && detail.outcome === "closed") {
     const origin = detail.detail?.closureOrigin ?? detail.closureOrigin;
+    if (origin === "external_close_verified_flat") return null; // reported by its own event
     return origin === "already_committed_protective_stop" ? "stop" : "closed";
   }
   // Unknown or pending is not equivalent to "not opened". Do not report an
@@ -55,6 +57,7 @@ const OUTCOME_TEXT = {
   not_opened: "Позиция не открыта.",
   closed: "Позиция зафиксирована.",
   stop: "Сработал стоп-лосс.",
+  closed_external: "Позиции больше нет на бирже (закрыта вручную или вне бота). Бот это проверил и снял её с сопровождения.",
   unmanaged: "Бот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.",
   take_delayed: "Цена достигла +5%, но позиция ещё не закрыта. Бот продолжает закрывать её. Стоп-лосс на бирже сохраняется.",
   take_stuck: "Позиция не закрыта через 15 минут после достижения +5%. Закройте её вручную на BingX VST. Стоп-лосс на бирже сохраняется.",

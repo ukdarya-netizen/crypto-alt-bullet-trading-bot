@@ -184,7 +184,8 @@ export function closeReasonGroup(reason: string | null | undefined): { id: strin
     case "source_withdrawal":
       return { id: "source", label: "Закрыто по сигналу AltBullet" };
     case "manual_owner_resolution":
-      return { id: "manual", label: "Закрыто вручную" };
+    case "external_close_verified_flat":
+      return { id: "manual", label: "Закрыто вручную / вне бота" };
     case "exchange_history_provenance":
       return { id: "history", label: "Восстановлено по истории биржи" };
     default:

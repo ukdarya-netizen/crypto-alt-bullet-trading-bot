@@ -1650,6 +1650,96 @@ export function createVstWorker({
   // Tick-start lane: close every latched take through the verified full-exit
   // path. Returns an "acted" result after one exchange action so the tick
   // boundary (one mutation per tick) is preserved.
+  // ---- Positions closed outside the bot (by hand on BingX, liquidation,
+  // or an order whose outcome was lost). Proof required before the ledger is
+  // changed: EXTERNAL_FLAT_MIN_OBSERVATIONS consecutive verified account
+  // reads, spanning at least EXTERNAL_FLAT_MIN_SPAN_MS, each showing no
+  // position and no open order for the symbol, and no write of this signal
+  // in flight during the last EXTERNAL_FLAT_INFLIGHT_MS.
+  const EXTERNAL_FLAT_MIN_OBSERVATIONS = 3;
+  const EXTERNAL_FLAT_MIN_SPAN_MS = 3 * 60_000;
+  const EXTERNAL_FLAT_INFLIGHT_MS = 5 * 60_000;
+  const externalFlatObservations = new Map(); // sourceSignalId -> { first, last, count }
+
+  async function reconcileExternallyFlatPositions(openPositions, accountState, unresolved) {
+    if (typeof store.closeVerifiedFlatPosition !== "function") return null;
+    const live = new Set(openPositions.map((record) => record?.sourceSignalId));
+    for (const id of [...externalFlatObservations.keys()]) {
+      if (!live.has(id)) externalFlatObservations.delete(id);
+    }
+    if (!validObject(accountState) || accountState.verified !== true ||
+        accountState.environment !== "vst" || typeof accountState.accountId !== "string" ||
+        !Array.isArray(accountState.positions) || !Array.isArray(accountState.openOrders)) {
+      return null;
+    }
+    const now = Number(clock());
+    for (const record of openPositions) {
+      const state = record?.snapshot;
+      if (!["open", "closing", "unknown"].includes(record?.status) ||
+          state?.environment !== "vst" || state?.accountId !== accountState.accountId ||
+          !isCanonicalVstSymbol(record.symbol)) continue;
+      const symbolKey = normalizeSymbolKey(record.symbol);
+      const flat = flatPositionFromAccountState(accountState, record.symbol) &&
+        (symbolOrders(accountState, record.symbol) ?? [null]).length === 0;
+      const inFlight = unresolved.some((intent) =>
+        (intent.sourceSignalId === record.sourceSignalId || intentBlocksSymbol(intent, symbolKey)) &&
+        ["prepared", "submitted"].includes(intent.state) &&
+        now - new Date(intent.updatedAt ?? intent.createdAt ?? 0).getTime() < EXTERNAL_FLAT_INFLIGHT_MS);
+      if (!flat || inFlight) {
+        externalFlatObservations.delete(record.sourceSignalId);
+        continue;
+      }
+      const prior = externalFlatObservations.get(record.sourceSignalId);
+      const seen = prior ? { ...prior, last: now, count: prior.count + 1 } : { first: now, last: now, count: 1 };
+      externalFlatObservations.set(record.sourceSignalId, seen);
+      if (seen.count < EXTERNAL_FLAT_MIN_OBSERVATIONS || seen.last - seen.first < EXTERNAL_FLAT_MIN_SPAN_MS) continue;
+      // Second, independent proof from the per-symbol position endpoint.
+      let direct;
+      try { direct = await broker.readPosition(record.symbol); } catch { continue; }
+      if (direct?.verified !== true || direct.environment !== "vst" ||
+          direct.accountId !== accountState.accountId || Number(direct.quantity) !== 0) {
+        externalFlatObservations.delete(record.sourceSignalId);
+        continue;
+      }
+      const closed = await store.closeVerifiedFlatPosition(record.sourceSignalId, {
+        observation: {
+          verified: true, environment: "vst", accountId: accountState.accountId,
+          symbol: record.symbol, positionQuantity: "0", openOrderCount: 0,
+          observations: seen.count,
+          firstObservedAt: new Date(seen.first).toISOString(),
+          lastObservedAt: new Date(seen.last).toISOString(),
+        },
+      });
+      externalFlatObservations.delete(record.sourceSignalId);
+      if (!closed) continue;
+      fullTakeLatches.delete(record.sourceSignalId);
+      fullTakeProgress.delete(record.sourceSignalId);
+      managementFailures.delete(record.sourceSignalId);
+      // A queued source exit for a position that is already gone is done.
+      if (sourceExitsEnabled && typeof store.listPendingSourceExitRequests === "function") {
+        try {
+          const pending = await store.listPendingSourceExitRequests({ sourceSignalId: record.sourceSignalId });
+          for (const row of Array.isArray(pending) ? pending : []) {
+            await store.finishSourceExitRequest(row.requestId, {
+              outcome: "closed", detail: { closureOrigin: "external_close_verified_flat" },
+            });
+          }
+        } catch (error) {
+          recordVstDiagnostic(error, { stage: "externalClose", operation: "finish_source_exit",
+            symbol: record.symbol, sourceSignalId: record.sourceSignalId });
+        }
+      }
+      try {
+        process.stdout.write(`Bullet VST external close verified: ${JSON.stringify({
+          sourceSignalId: record.sourceSignalId, symbol: record.symbol, previousStatus: record.status,
+          observations: seen.count })}\n`);
+      } catch {}
+      return { kind: "acted", operation: "external_close_verified_flat",
+        sourceSignalId: record.sourceSignalId, symbol: record.symbol };
+    }
+    return null;
+  }
+
   const MANAGEMENT_FAILURE_QUARANTINE_REPEATS = 3;
   // sourceSignalId -> { ref, count, reported }
   const managementFailures = new Map();
@@ -14426,6 +14516,13 @@ export function createVstWorker({
       );
       if (historicalRepair) return historicalRepair;
       const openPositions = await store.listOpenPositions();
+      // Self-healing: a ledger position whose symbol has been flat on the
+      // exchange (no position, no open orders, no in-flight write) across
+      // several fresh account reads is closed in the ledger automatically.
+      const externalClose = await reconcileExternallyFlatPositions(
+        openPositions, accountState, unresolved,
+      );
+      if (externalClose) return externalClose;
       const openPositionIds = new Set(openPositions.map((record) =>
         record?.sourceSignalId).filter((id) => typeof id === "string"));
       for (const key of positionIssueSince.keys()) {

@@ -120,6 +120,22 @@ function durableStore(initialPosition) {
       for (const row of data.positions) row.status = status;
     },
     async recordEvent(...event) { data.events.push(event); },
+    async closeVerifiedFlatPosition(sourceSignalId, { observation }) {
+      const row = data.positions.find((item) => item.sourceSignalId === sourceSignalId);
+      if (!row || !["open", "closing", "unknown"].includes(row.status)) return null;
+      const previousStatus = row.status;
+      row.status = "closed";
+      row.snapshot = { ...row.snapshot, status: "closed", closeReason: "external_close_verified_flat",
+        remainingQty: 0, coreOpen: false, runnerOpen: false, externalClose: { ...observation, previousStatus } };
+      data.status = "closed";
+      for (const intent of data.intents) {
+        if (intent.sourceSignalId === sourceSignalId && ["prepared", "submitted", "unknown"].includes(intent.state)) {
+          intent.state = "failed";
+        }
+      }
+      data.events.push([sourceSignalId, "vst_external_close_verified", { ...observation, previousStatus }]);
+      return row;
+    },
     async listUnresolvedIntents() {
       return data.intents.filter((intent) =>
         ["prepared", "submitted", "unknown"].includes(intent.state));
@@ -3027,7 +3043,11 @@ test("a bounded transient managed-position GET failure is symbol-local and recov
   const recovered = await worker.runOnce();
   assert.equal(recovered.kind, "acted", JSON.stringify(recovered));
   assert.equal(recovered.operation, "close_leg");
-  assert.equal(readSymbols[readsBeforeRecovery], SYMBOL);
+  // BTCUSDT exists only in the ledger here (the account-wide read never shows
+  // it), so the external-close check probes it directly first; the per-symbol
+  // read still reports it open, so nothing is closed.
+  assert.equal(readSymbols.slice(readsBeforeRecovery).filter((symbol) => symbol !== "BTCUSDT")[0], SYMBOL);
+  assert.equal(fixture.store.data.positions.find((row) => row.symbol === "BTCUSDT")?.status, "open");
   assert.equal(fixture.store.data.positions[0].snapshot.version,
     "bullet-long-exits-v2");
 });
@@ -5790,4 +5810,51 @@ test("an impulse position without a split object (single core leg) is managed wi
   for (let i = 0; i < 2; i++) {
     await assert.doesNotReject(worker.tick(), /coreStop/);
   }
+});
+
+test("a position closed outside the bot is closed in the ledger after repeated verified flat reads", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  let now = NOW;
+  const worker = createVstWorker({ store, broker, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await worker.tick();
+  assert.notEqual(store.data.positions[0].status, "closed");
+  // The owner closes it by hand on BingX: no position, no orders.
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  const results = [];
+  for (const offset of [0, 60_000, 120_000, 181_000]) {
+    now = NOW + offset;
+    results.push(await worker.tick().then((r) => r?.operation ?? r?.kind, (e) => `error:${e.message}`));
+    if (store.data.positions[0].status === "closed") break;
+  }
+  assert.equal(store.data.positions[0].status, "closed", JSON.stringify(results));
+  assert.equal(results.at(-1), "external_close_verified_flat");
+  assert.equal(results.length, 4, "not before 3 reads spanning 3 minutes");
+  const snapshot = store.data.positions[0].snapshot;
+  assert.equal(snapshot.closeReason, "external_close_verified_flat");
+  assert.equal(snapshot.closeFill, undefined, "no exit price is invented");
+  assert.ok(store.data.events.some((row) => row[1] === "vst_external_close_verified"));
+});
+
+test("a symbol that is only briefly flat is not closed", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  let now = NOW;
+  const worker = createVstWorker({ store, broker, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  const orders = exchange.orders.map((row) => ({ ...row }));
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  for (const offset of [0, 60_000]) { now = NOW + offset; await worker.tick().catch(() => {}); }
+  exchange.setPositionQuantity("0.1");
+  exchange.orders.push(...orders);
+  now = NOW + 120_000; await worker.tick().catch(() => {});
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  now = NOW + 200_000; await worker.tick().catch(() => {});
+  assert.notEqual(store.data.positions[0].status, "closed", "the flat streak was interrupted and restarted");
 });

@@ -204,3 +204,11 @@ test("a quarantined position is reported once in plain text", () => {
   assert.equal(formatVstTradeOutcome(event("vst_position_management_quarantined", { detail: { diagnosticRef: "x" } })),
     "BingX VST · WOOUSDT\nБот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.");
 });
+
+test("a position verified flat outside the bot is reported once, not also as a bot close", () => {
+  assert.equal(formatVstTradeOutcome(event("vst_external_close_verified", { detail: { observations: 3 } })),
+    "BingX VST · WOOUSDT\nПозиции больше нет на бирже (закрыта вручную или вне бота). Бот это проверил и снял её с сопровождения.");
+  assert.equal(vstTradeOutcome(event("source_exit_completed", {
+    detail: { outcome: "closed", detail: { closureOrigin: "external_close_verified_flat" } },
+  })), null);
+});
