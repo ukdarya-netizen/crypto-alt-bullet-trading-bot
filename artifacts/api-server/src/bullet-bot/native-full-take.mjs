@@ -90,7 +90,8 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
     assertVst();
     if (!/^[A-Z0-9]+USDT$/.test(binding.symbol) || !positive(binding.quantity) ||
         !positive(binding.takePrice) || !/^[1-9]\d*$/.test(binding.positionId) ||
-        !/^[1-9]\d*$/.test(binding.entryOrderId) || binding.workingType !== "CONTRACT_PRICE")
+        !/^[1-9]\d*$/.test(binding.entryOrderId) || binding.workingType !== "CONTRACT_PRICE" ||
+        !/^[A-Za-z0-9_-]{1,40}$/.test(binding.clientOrderId ?? ""))
       throw new Error("native_take_binding_invalid");
     const previous = bindings.get(binding.clientOrderId);
     if (previous?.orderId && binding.orderId && previous.orderId !== binding.orderId)
@@ -161,7 +162,10 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
       positionSide: "LONG", quantity: binding.quantity, stopPrice: binding.takePrice,
       workingType: binding.workingType, closePosition: "true", clientOrderId: binding.clientOrderId,
     }, { beforeSign: verify, beforeTransport: onAttemptStarted });
-    const submitted = { ...binding, orderId: exactOrderId(response) };
+    const orderId = exactOrderId(response);
+    if (orderId === binding.entryOrderId || stops.some((s) => s.orderId === orderId))
+      throw new Error("native_take_ack_conflicts_with_existing_order");
+    const submitted = { ...binding, orderId };
     register(submitted);
     return submitted;
   }

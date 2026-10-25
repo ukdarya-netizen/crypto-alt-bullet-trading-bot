@@ -8031,7 +8031,7 @@ export function createBingXLiveApi({
       requireVstBtc("BTCUSDT");
       return runControlledVstBracketProbe({
         ...options,
-        api: { contract, getPositions, getOpenOrders, getPositionMode, getMarginType,
+        api: { contract, getPositions, getOpenOrders: readRawOpenOrders, getPositionMode, getMarginType,
           getLeverage, getVstMarkPrice, setVstLongLeverage10,
           placeVstBoundedLong: (input) => placeVstBoundedLong({
             ...input, probePolicy: VST_BTC_HEDGE_LONG10_SHORT75_PROBE,
