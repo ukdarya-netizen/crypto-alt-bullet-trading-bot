@@ -5752,3 +5752,28 @@ test("fixed five-percent take: blocked close escalates once, survives restart fr
   await worker.observeFullTakePrices();
   assert.equal(count("vst_full_take_close_stuck"), 1, "a closed position is never escalated");
 });
+
+test("a position whose management throws the same local error every tick is quarantined, not the whole bot", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  const getIntent = store.getIntent.bind(store);
+  store.getIntent = async (id, phase) => {
+    if (typeof phase === "string" && phase.startsWith("source-exit-")) {
+      throw new TypeError("simulated local defect");
+    }
+    return getIntent(id, phase);
+  };
+  const worker = createVstWorker({ store, broker, clock: () => NOW,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  const outcomes = [];
+  for (let i = 0; i < 4; i++) {
+    outcomes.push(await worker.tick().then(() => "ok", (error) => error.message));
+  }
+  assert.deepEqual(outcomes.slice(0, 2), ["simulated local defect", "simulated local defect"]);
+  assert.deepEqual(outcomes.slice(2), ["ok", "ok"], "from the third identical failure the tick continues");
+  const quarantined = store.data.events.filter((row) => row[1] === "vst_position_management_quarantined");
+  assert.equal(quarantined.length, 1, "the owner is told once");
+  assert.equal(quarantined[0][2].symbol, SYMBOL);
+  assert.equal(store.data.positions[0].status === "closed", false, "nothing was closed or changed");
+});

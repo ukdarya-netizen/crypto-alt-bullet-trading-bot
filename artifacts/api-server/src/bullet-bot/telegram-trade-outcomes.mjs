@@ -18,6 +18,7 @@ export function vstTradeOutcome(event) {
       detail.reason === "entry_unverified_symbol_flat_after_timeout") return "not_opened";
   if (event.kind === "vst_worker_error" && detail.reason === "vst_order_rejected" &&
       detail.operation === "entry") return "not_opened";
+  if (event.kind === "vst_position_management_quarantined") return "unmanaged";
   if (event.kind === "vst_full_take_close_delayed") return "take_delayed";
   if (event.kind === "vst_full_take_close_stuck") return "take_stuck";
   if (event.kind === "vst_triggered_stop_verified") return "stop";
@@ -54,6 +55,7 @@ const OUTCOME_TEXT = {
   not_opened: "Позиция не открыта.",
   closed: "Позиция зафиксирована.",
   stop: "Сработал стоп-лосс.",
+  unmanaged: "Бот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.",
   take_delayed: "Цена достигла +5%, но позиция ещё не закрыта. Бот продолжает закрывать её. Стоп-лосс на бирже сохраняется.",
   take_stuck: "Позиция не закрыта через 15 минут после достижения +5%. Закройте её вручную на BingX VST. Стоп-лосс на бирже сохраняется.",
 };

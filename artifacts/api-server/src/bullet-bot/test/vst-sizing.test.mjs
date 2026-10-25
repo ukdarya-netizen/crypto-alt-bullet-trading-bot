@@ -260,3 +260,14 @@ test("sizes other USDT perpetuals only with matching verified contract metadata"
     filters: { ...base.filters, symbol: "BTC-USDC" },
   }), /canonical USDT perpetual symbol/);
 });
+test("a 7-decimal tick passed as a number (1e-7, e.g. 1000PEPEUSDT) is accepted", () => {
+  const result = sizeVstLongTrade({
+    ...base, symbol: "1000PEPEUSDT",
+    quote: { price: "0.0101234", observedAtMs: NOW - 1_000 },
+    expectedPrice: "0.0101234", stopLoss: "0.0093",
+    filters: { ...base.filters, symbol: "1000PEPE-USDT", quantityPrecision: 0, pricePrecision: 7,
+      minQuantity: "1", minNotional: "5" },
+    tickSize: 1 / (10 ** 7),
+  });
+  assert.equal(result.status, "ready");
+});

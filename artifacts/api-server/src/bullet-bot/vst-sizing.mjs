@@ -3,8 +3,12 @@ const VST_BUDGET_RATE = 0.01;
 const CENTS = 100;
 
 function decimal(value, name, { allowZero = false } = {}) {
+  // Small numbers stringify in exponent form (1e-7 for a 7-decimal tick,
+  // e.g. 1000PEPEUSDT); expand them to a plain decimal instead of refusing.
   const text = typeof value === "string" ? value
-    : typeof value === "number" && Number.isFinite(value) ? String(value) : "";
+    : typeof value === "number" && Number.isFinite(value)
+      ? (/e/i.test(String(value)) ? value.toFixed(18).replace(/\.?0+$/, "") : String(value))
+      : "";
   const match = /^(\d+)(?:\.(\d+))?$/.exec(text);
   if (!match) throw new TypeError(`${name} must be a plain non-negative decimal`);
   const fraction = match[2] ?? "";

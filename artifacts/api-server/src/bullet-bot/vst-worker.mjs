@@ -1650,6 +1650,35 @@ export function createVstWorker({
   // Tick-start lane: close every latched take through the verified full-exit
   // path. Returns an "acted" result after one exchange action so the tick
   // boundary (one mutation per tick) is preserved.
+  const MANAGEMENT_FAILURE_QUARANTINE_REPEATS = 3;
+  // sourceSignalId -> { ref, count, reported }
+  const managementFailures = new Map();
+  function noteManagementFailure(sourceSignalId, ref) {
+    const prior = managementFailures.get(sourceSignalId);
+    const next = prior?.ref === ref
+      ? { ...prior, count: prior.count + 1 }
+      : { ref, count: 1, reported: false };
+    managementFailures.set(sourceSignalId, next);
+    return next.count;
+  }
+  async function reportManagementQuarantine(record, ref) {
+    const entry = managementFailures.get(record.sourceSignalId);
+    if (!entry || entry.reported) return;
+    entry.reported = true;
+    try {
+      await store.recordEvent?.(record.sourceSignalId, "vst_position_management_quarantined", {
+        symbol: record.symbol, diagnosticRef: ref, repeats: entry.count,
+      });
+    } catch (error) {
+      recordVstDiagnostic(error, { stage: "positionManagement", operation: "record_quarantine",
+        symbol: record.symbol, sourceSignalId: record.sourceSignalId });
+    }
+    try {
+      process.stdout.write(`Bullet VST position quarantined: ${JSON.stringify({
+        sourceSignalId: record.sourceSignalId, symbol: record.symbol, diagnosticRef: ref })}\n`);
+    } catch {}
+  }
+
   const MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS = 2;
   let managementRotation = 0;
   async function freshEntryWaiting() {
@@ -1680,6 +1709,11 @@ export function createVstWorker({
       for (const record of open) {
         const evidence = latchedFullTakeEvidence(record);
         if (!evidence) continue;
+        // A close that cannot complete (e.g. the position was closed by hand
+        // and needs owner review) is retried every 30s, not on every tick:
+        // each attempt costs several paced exchange reads.
+        const retryAt = fullTakeProgress.get(record.sourceSignalId)?.retryAt ?? 0;
+        if (Number(clock()) < retryAt) continue;
         const symbol = record.snapshot?.symbol;
         fullTakeAttempted.add(record.sourceSignalId);
         if (sourceExitBlockedSymbols.has(normalizeSymbolKey(symbol))) {
@@ -1718,6 +1752,9 @@ export function createVstWorker({
           fullTakeLatches.delete(record.sourceSignalId);
           fullTakeProgress.delete(record.sourceSignalId);
         } else {
+          if (result?.kind !== "acted" && !exchangeActionAttemptedThisTick) {
+            fullTakeProgressFor(record.sourceSignalId).retryAt = Number(clock()) + 30_000;
+          }
           await noteFullTakeProgress(record,
             completed?.detail?.reason ?? result?.reason ?? result?.operation ?? result?.kind,
             { kind: result?.kind, operation: result?.operation,
@@ -14556,6 +14593,7 @@ export function createVstWorker({
             record, assessment.capabilities, allowActions, reusableAccountSnapshot,
             protectedExitAllowed,
           ));
+          managementFailures.delete(record.sourceSignalId);
         } catch (error) {
           const diagnostic = recordVstDiagnostic(error, {
             stage: "positionManagement", operation: "manage_position",
@@ -14567,6 +14605,15 @@ export function createVstWorker({
             diagnostic.proofEvidence?.source === "broker_validation";
           const canIsolate = Boolean(symbolKey && samePersistedVstAccount &&
             !exchangeActionAttemptedThisTick && reviewedBrokerFailure);
+          // The same local exception on the same position every tick used to
+          // stop the WHOLE bot (no entries for hours: IDUSDT, 2026-10-25).
+          // After MANAGEMENT_FAILURE_QUARANTINE_REPEATS identical failures with
+          // no exchange action attempted, only THIS position is quarantined.
+          // Its exchange stop stays, and the +5% take lane still runs for it.
+          const repeats = noteManagementFailure(record.sourceSignalId, diagnostic.ref);
+          const quarantine = !canIsolate && Boolean(symbolKey && samePersistedVstAccount) &&
+            !exchangeActionAttemptedThisTick &&
+            repeats >= MANAGEMENT_FAILURE_QUARANTINE_REPEATS;
           if (typeof store.recordGuardEventOnce === "function") {
             await store.recordGuardEventOnce(record.sourceSignalId,
               "vst_position_management_diagnostic", {
@@ -14579,13 +14626,15 @@ export function createVstWorker({
           // Isolate a read/validation failure only when its persisted account
           // and symbol are known and this tick has not attempted a mutation.
           // Unknown identity or a potentially sent write remains a hard boundary.
-          if (!canIsolate) {
+          if (!canIsolate && !quarantine) {
             diagnosticContext.failedManagedSymbol =
               diagnosticContext.currentManagedSymbol;
             diagnosticContext.failedManagedSourceSignalId = record.sourceSignalId;
             throw error;
           }
-          outcome = { kind: "unknown", reason: "position_management_exception",
+          if (quarantine) await reportManagementQuarantine(record, diagnostic.ref);
+          outcome = { kind: "unknown",
+            reason: quarantine ? "position_management_exception_repeating" : "position_management_exception",
             sourceSignalId: record.sourceSignalId, symbol: record.symbol,
             operation: "manage_position", diagnosticRef: diagnostic.ref };
         } finally {

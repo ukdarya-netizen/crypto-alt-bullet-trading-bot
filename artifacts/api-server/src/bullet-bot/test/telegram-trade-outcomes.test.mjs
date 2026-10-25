@@ -199,3 +199,8 @@ test("a restart does not repeat an opening already posted for the same signal", 
   assert.deepEqual(messages, ["BingX VST · WOOUSDT\nПозиция открыта."]);
   assert.equal(acknowledged.size, 2);
 });
+
+test("a quarantined position is reported once in plain text", () => {
+  assert.equal(formatVstTradeOutcome(event("vst_position_management_quarantined", { detail: { diagnosticRef: "x" } })),
+    "BingX VST · WOOUSDT\nБот не может сопровождать эту позицию из-за ошибки. Стоп-лосс на бирже стоит, тейк +5% отслеживается. Новые сигналы по другим монетам открываются.");
+});
