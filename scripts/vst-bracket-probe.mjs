@@ -2,7 +2,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createBingXLiveApi } from "../artifacts/api-server/src/bullet-bot/bingx-live-api.mjs";
 import { createVstEndpointPacer } from "../artifacts/api-server/src/bullet-bot/vst-endpoint-pacer.mjs";
 
@@ -10,10 +10,12 @@ export async function main() {
   if (!process.argv.includes("--owner-approved")) throw Error("explicit_owner_approval_required");
   // The second slot is separately owner-approved. Never erase or reuse the
   // first attempt's journal; neither slot permits another entry on rerun.
-  const path = resolve(".local/vst-bracket-probe",
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const path = resolve(root, ".local/vst-bracket-probe",
     process.argv.includes("--second-owner-approved") ? "second-state.json" : "state.json");
   await mkdir(dirname(path), { recursive: true });
-  const lockPath = `${path}.lock`;
+  // Shared with the older BTC probes, across both journal slots and CWDs.
+  const lockPath = resolve(root, ".local/vst-btc-operations.lock");
   const lock = await open(lockPath, "wx", 0o600);
   await lock.writeFile(JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
   await lock.close();
