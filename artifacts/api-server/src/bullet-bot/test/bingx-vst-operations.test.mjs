@@ -1166,6 +1166,27 @@ test("VST bounded long posts a price-capped LIMIT FOK with attached stop", async
   assert.equal(entry.url.searchParams.get("clientOrderId"), "ve_bounded-1");
 });
 
+test("bounded BTC bracket probe uses explicit LONG10 SHORT75 policy without relaxing its ten-VST cap", async () => {
+  const { api, calls } = fixture({
+    dualSidePosition: true, longLeverage: 10, shortLeverage: 75,
+  });
+  await api.placeVstBoundedLong({
+    symbol: "BTCUSDT", quantity: "0.001", maxPrice: "65300.0",
+    stopLoss: "64000.0", clientOrderId: "bracket-policy",
+    probePolicy: VST_BTC_HEDGE_LONG10_SHORT75_PROBE,
+  });
+  assert.equal(calls.filter(({ options }) => options.method === "POST").length, 1);
+  const oversized = fixture({
+    dualSidePosition: true, longLeverage: 10, shortLeverage: 75,
+  });
+  await assert.rejects(oversized.api.placeVstBoundedLong({
+    symbol: "BTCUSDT", quantity: "0.002", maxPrice: "65300.0",
+    stopLoss: "64000.0", clientOrderId: "bracket-policy-cap",
+    probePolicy: VST_BTC_HEDGE_LONG10_SHORT75_PROBE,
+  }), /exceeds 100 VST notional/);
+  assert.equal(oversized.calls.some(({ options }) => options.method === "POST"), false);
+});
+
 test("bounded VST entry rejects unsafe state, >100 notional, mainnet, and wrong symbol", async () => {
   for (const options of [
     { marginType: "CROSSED" },

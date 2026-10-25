@@ -61,6 +61,23 @@ export async function runControlledVstBracketProbe({
     }
     return orders;
   }
+  // This one documented refusal occurs before request()/transport. The
+  // original implementation applied the old symmetric 10x check to BTC's
+  // explicit LONG10/SHORT75 probe profile. A correction may resume ONLY the
+  // same client ID, after a successful null exact-ID query and flat/no orders.
+  // No ambiguous or transported attempt is ever eligible.
+  if (state?.entryTransportError === "VST bounded entry preflight blocked: leverage10" &&
+      !state.entrySentAt && !state.preflightRefusalCorrected) {
+    const [prior, positions, orders] = await Promise.all([
+      api.queryOrder(SYMBOL, { clientOrderId: state.entryClientId }),
+      api.getPositions(SYMBOL), api.getOpenOrders(SYMBOL),
+    ]);
+    if (prior !== null || active(positions).length || orders.length) {
+      throw Error("probe_pre_sign_recovery_not_proven");
+    }
+    await record({ preflightRefusalCorrected: true, entryTransportError: null,
+      entryAttemptedAt: null, phase: "prepared" });
+  }
   if (state === null) {
     const [positions, orders, mode, margin, filters] = await Promise.all([
       api.getPositions(SYMBOL), api.getOpenOrders(SYMBOL), api.getPositionMode(),
@@ -78,6 +95,9 @@ export async function runControlledVstBracketProbe({
       await record({ leveragePreparationAttempted: true });
       await api.setVstLongLeverage10(SYMBOL);
     }
+  }
+  if (!state.entryAttemptedAt) {
+    const filters = await api.contract(SYMBOL);
     const quote = await api.getVstMarkPrice(SYMBOL);
     const ask = Number(quote.markCorroboration?.ask ?? quote.markPrice);
     if (!Number.isFinite(ask) || ask <= 0 ||
@@ -97,6 +117,7 @@ export async function runControlledVstBracketProbe({
     try {
       await api.placeVstBoundedLong({
         symbol: SYMBOL, quantity, maxPrice, stopLoss, clientOrderId: state.entryClientId,
+        onAttemptStarted: async () => record({ entrySentAt: new Date(clock()).toISOString() }),
         beforeSign: async () => {
           const [positions, orders, mode, margin, leverage] = await Promise.all([
             api.getPositions(SYMBOL), api.getOpenOrders(SYMBOL),

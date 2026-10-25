@@ -1844,9 +1844,10 @@ export function createBingXLiveApi({
   }
 
   async function placeVstBoundedLong({
-    symbol, quantity, maxPrice, stopLoss, clientOrderId, onAttemptStarted, beforeSign,
+    symbol, quantity, maxPrice, stopLoss, clientOrderId, onAttemptStarted, beforeSign, probePolicy,
   }) {
     const name = requireVstBtc(symbol);
+    if (probePolicy !== undefined) requireProbePolicy(symbol, probePolicy);
     if (typeof clientOrderId !== "string" ||
         !/^[A-Za-z0-9_-]{1,32}$/.test(clientOrderId)) {
       throw new BingXLiveApiError(
@@ -1862,6 +1863,7 @@ export function createBingXLiveApi({
     decimalAtPrecision(price, filters.pricePrecision, "Maximum entry price");
     const readiness = await preflight(symbol, {
       requiredMargin: 10, quantity, entryPrice: price, stopLoss,
+      ...(probePolicy !== undefined ? { probePolicy } : {}),
     });
     const notional = positive(floorQuantity(quantity, filters.quantityPrecision), "quantity") *
       positive(price, "maximum entry price");
@@ -7986,7 +7988,10 @@ export function createBingXLiveApi({
       return runControlledVstBracketProbe({
         ...options,
         api: { contract, getPositions, getOpenOrders, getPositionMode, getMarginType,
-          getLeverage, getVstMarkPrice, setVstLongLeverage10, placeVstBoundedLong,
+          getLeverage, getVstMarkPrice, setVstLongLeverage10,
+          placeVstBoundedLong: (input) => placeVstBoundedLong({
+            ...input, probePolicy: VST_BTC_HEDGE_LONG10_SHORT75_PROBE,
+          }),
           queryOrder, closeLong },
         closePolicy: VST_AUTOMATED_LONG_POLICY,
         submitTake: (params, guard) => request("POST", PATH.order, params, { beforeSign: guard }),
