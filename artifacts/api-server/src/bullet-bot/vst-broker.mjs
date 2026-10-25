@@ -25,6 +25,7 @@ import {
 import { buildVstStopEvidence } from "./vst-stop-evidence.mjs";
 import { buildVstProofEvidence } from "./vst-proof-evidence.mjs";
 import { validateProtectedExit } from "./vst-protected-exit.mjs";
+import { createNativeTakeManager, proveNativeTakeFill } from "./native-full-take.mjs";
 
 const evidencePair = (expected, actual, matches = expected === actual) =>
   ({ expected, actual, matches });
@@ -581,6 +582,11 @@ export function createVstBroker({
   maxHistoryAgeMs = 10 * 60_000,
   fillArchiveStore,
 }) {
+  const nativeApi = api;
+  // Explicit stop-proof view, not a filtered public exchange API. It excludes
+  // only exact acknowledged and journalled takes verified on this native read.
+  if (typeof api?.getProtectionOrders === "function")
+    api = { ...api, getOpenOrders: api.getProtectionOrders };
   if (!api || typeof api.getVstMarkPrice !== "function" ||
       typeof api.placeVstAutomatedLong !== "function" ||
       typeof api.upgradeVstLongStop !== "function" ||
@@ -10693,6 +10699,12 @@ export function createVstBroker({
   }
 
   return Object.freeze({
+    ...(nativeApi.nativeFullTake ? {
+      createNativeTakeProfitManager: (store) => createNativeTakeManager({
+        api: nativeApi, store, clock,
+        proveFill: (binding, stops) => proveNativeTakeFill(nativeApi, binding, stops, Number(clock())),
+      }),
+    } : {}),
     positionProfile: PROFILE,
     proveEntryNotExecuted,
     stopTransferJournalVersion: typeof api.withStopTransferJournal === "function" ? 1 : 0,

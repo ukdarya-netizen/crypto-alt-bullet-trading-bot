@@ -3657,11 +3657,34 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
       return result.rows.map(intentFromRow);
     },
 
+    async latestNativeTakeIntent(sourceSignalId) {
+      requireString(sourceSignalId, "sourceSignalId");
+      const result = await pool.query(
+        `SELECT source_signal_id, phase, client_order_id, request, state,
+                exchange_order_id, outcome, created_at, updated_at
+         FROM vst_order_intents WHERE source_signal_id = $1
+           AND phase LIKE 'native-full-take-%' ORDER BY id DESC LIMIT 1`,
+        [sourceSignalId],
+      );
+      return result.rows[0] ? intentFromRow(result.rows[0]) : null;
+    },
+
+    async listNativeTakeIntents() {
+      const result = await pool.query(
+        `SELECT source_signal_id, phase, client_order_id, request, state,
+                exchange_order_id, outcome, created_at, updated_at
+         FROM vst_order_intents WHERE phase LIKE 'native-full-take-%'
+           AND state IN ('prepared', 'submitted', 'unknown') ORDER BY id`,
+      );
+      return result.rows.map(intentFromRow);
+    },
+
     async listUnresolvedIntents() {
       const result = await pool.query(
         `SELECT source_signal_id, phase, client_order_id, request, state,
                 exchange_order_id, outcome, created_at, updated_at
          FROM vst_order_intents WHERE state IN ('prepared', 'submitted', 'unknown')
+           AND phase NOT LIKE 'native-full-take-%'
          ORDER BY created_at, id`,
       );
       return result.rows.map(intentFromRow);

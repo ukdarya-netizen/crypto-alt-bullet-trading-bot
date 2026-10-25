@@ -1483,6 +1483,9 @@ export function createVstWorker({
   positionProfile = broker?.positionProfile ?? OWNER_POSITION_PROFILE,
 }) {
   const PROFILE = normalizePositionProfile(positionProfile);
+  const nativeTakeProfit = exitStrategy === FULL_TAKE_5PCT &&
+    typeof broker.createNativeTakeProfitManager === "function"
+    ? broker.createNativeTakeProfitManager(store) : null;
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
   const profileMarginIs = (value) => marginModeIs(value, PROFILE);
@@ -1700,6 +1703,7 @@ export function createVstWorker({
     const now = Number(clock());
     for (const record of openPositions) {
       const state = record?.snapshot;
+      if (nativeTakeProfit?.blocksPosition(record?.sourceSignalId)) continue;
       if (!["open", "closing", "unknown"].includes(record?.status) ||
           state?.environment !== "vst" || state?.accountId !== accountState.accountId ||
           !isCanonicalVstSymbol(record.symbol)) continue;
@@ -6592,6 +6596,14 @@ export function createVstWorker({
       await store.recordEvent?.(
         intent.sourceSignalId, "vst_entry_verified", eventDetail, intent.clientOrderId,
       );
+    }
+    if (nativeTakeProfit) {
+      try { await nativeTakeProfit.ensure({ sourceSignalId: intent.sourceSignalId,
+        symbol: signal.symbol, status: "open", snapshot: position }); }
+      catch (error) {
+        recordVstDiagnostic(error, { stage: "nativeTake", operation: "place_native_take",
+          symbol: signal.symbol, sourceSignalId: intent.sourceSignalId });
+      }
     }
     return true;
   }
@@ -14361,6 +14373,7 @@ export function createVstWorker({
       return { kind: "paused", reason: "vst_execution_paused" };
     }
     return store.withLeaderLock(async () => {
+      if (nativeTakeProfit) await nativeTakeProfit.sweep();
       exchangeActionAttemptedThisTick = false;
       historicalProofAttemptedThisTick = false;
       positionIssuesThisTick.clear();

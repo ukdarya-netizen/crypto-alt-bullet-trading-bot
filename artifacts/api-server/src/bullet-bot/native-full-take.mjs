@@ -19,6 +19,17 @@ function positive(value) {
   const p = exactDecimalParts(value);
   return Boolean(p && p.units > 0n);
 }
+function decimalText(units, scale) {
+  const sign = units < 0n ? "-" : "";
+  const text = (units < 0n ? -units : units).toString().padStart(scale + 1, "0");
+  return scale ? `${sign}${text.slice(0, -scale)}.${text.slice(-scale)}` : `${sign}${text}`;
+}
+function sumDecimal(values) {
+  const parts = values.map((v) => exactDecimalParts(v));
+  if (parts.some((p) => !p)) throw new Error("native_take_decimal_invalid");
+  const scale = Math.max(0, ...parts.map((p) => p.scale));
+  return decimalText(parts.reduce((n, p) => n + p.units * 10n ** BigInt(scale - p.scale), 0n), scale);
+}
 export function nativeTakePrice(entry, precision) {
   const p = exactDecimalParts(entry);
   if (!p || p.units <= 0n || !Number.isInteger(precision) || precision < 0 || precision > 18)
@@ -104,8 +115,7 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
           !equal(row.stopPrice, expected.stopPrice) || Number(row.executedQty ?? 0) !== 0)
         throw new Error("native_take_original_stop_not_verified");
     }
-    if (!equal(stops.reduce((sum, s) => sum + Number(s.quantity), 0).toFixed(12)
-      .replace(/0+$/, "").replace(/\.$/, ""), binding.quantity))
+    if (!equal(sumDecimal(stops.map((s) => s.quantity)), binding.quantity))
       throw new Error("native_take_stop_coverage_changed");
   }
   async function create(binding, stops, onAttemptStarted) {
@@ -156,7 +166,7 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
       triggerBasisVerified: Boolean(open && open.workingType === binding.workingType &&
         queried?.workingType === binding.workingType) };
   }
-  async function cancelWhenFlat(binding, expected = null) {
+  async function cancelWhenFlat(binding, expected = null, allowSamePosition = false) {
     assertVst();
     const order = expected ?? { orderId: binding.orderId, quantity: binding.quantity,
       stopPrice: binding.takePrice, type: "TAKE_PROFIT_MARKET" };
@@ -165,7 +175,8 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
       const [positions, orders] = await Promise.all([
         readPositions(binding.symbol), readOrders(binding.symbol),
       ]);
-      if (positions.some((r) => r.symbol === nativeSymbol(binding.symbol) && Number(r.positionAmt) !== 0))
+      const active = positionRows(positions, binding);
+      if (active.length && (!allowSamePosition || expected !== null))
         throw new Error("native_take_cleanup_requires_flat_symbol");
       const rows = orders.filter((r) => id(r) === order.orderId);
       if (!rows.length) { absent = true; return; }
@@ -200,6 +211,102 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
     } });
 }
 
+// A native fill is established from complete, bounded exchange executions,
+// exact parent/child linkage and a fresh flat position. A missing position,
+// an acknowledgement, or a positive PnL is never fill evidence.
+export async function proveNativeTakeFill(api, binding, knownStops, now = Date.now()) {
+  try {
+    const [parent, positions, orders, fills] = await Promise.all([
+      api.queryOrder(binding.symbol, { orderId: binding.orderId }),
+      api.getPositions(binding.symbol), api.getOpenOrders(binding.symbol),
+      api.queryFills(binding.symbol, {
+        startTs: Math.max(1, binding.createdAt - 60_000, now - 86_400_000),
+        endTs: now, currency: "VST", requireComplete: true,
+      }),
+    ]);
+    if (!parent || parent.status !== "FILLED" || parent.symbol !== nativeSymbol(binding.symbol) ||
+        parent.side !== "SELL" || parent.positionSide !== "LONG" ||
+        !["TAKE_PROFIT_MARKET", "MARKET", "LIMIT"].includes(parent.type) ||
+        parent.type === "LIMIT" && (parent.takeProfit?.type !== "TAKE_PROFIT_MARKET" ||
+          !equal(parent.price, "0")) ||
+        positions.some((p) => p.symbol === nativeSymbol(binding.symbol) && Number(p.positionAmt) !== 0))
+      return { verified: false };
+    for (const order of orders) {
+      const expected = knownStops.find((s) => s.orderId === id(order));
+      if (!expected || order.symbol !== nativeSymbol(binding.symbol) || order.type !== "STOP_MARKET" ||
+          order.status !== "NEW" || order.side !== "SELL" || order.positionSide !== "LONG" ||
+          id(order, ["positionId", "positionID"]) !== binding.positionId ||
+          !equal(order.origQty ?? order.quantity, expected.quantity) ||
+          !equal(order.stopPrice, expected.stopPrice)) return { verified: false };
+    }
+    const linked = fills.filter((f) => {
+      const values = [f.triggerOrderId, f.triggerOrderID].filter((v) => v != null);
+      if (!values.some((v) => v === binding.orderId)) return false;
+      return id(f, ["triggerOrderId", "triggerOrderID"]) === binding.orderId;
+    });
+    if (!linked.length) return { verified: false };
+    const childIds = new Set(linked.map((f) => id(f)));
+    if (childIds.size !== 1) return { verified: false };
+    const childOrderId = [...childIds][0];
+    if (id(parent) !== binding.orderId && id(parent) !== childOrderId) return { verified: false };
+    const child = await api.queryOrder(binding.symbol, { orderId: childOrderId });
+    if (!child || id(child) !== childOrderId || child.status !== "FILLED" ||
+        child.symbol !== nativeSymbol(binding.symbol) || child.side !== "SELL" ||
+        child.positionSide !== "LONG" || !["MARKET", "TAKE_PROFIT_MARKET"].includes(child.type) ||
+        !equal(child.executedQty, binding.quantity)) return { verified: false };
+    for (const row of [parent, child, ...linked]) {
+      const supplied = [row.positionId, row.positionID].filter((v) => v != null && String(v) !== "0");
+      if (supplied.some((v) => v !== binding.positionId)) return { verified: false };
+    }
+    const aliases = (row, fields, timestamp = false) => {
+      const values = fields.map((k) => row[k]).filter((v) => v !== undefined && v !== null);
+      if (!values.length) throw new Error("native_take_fill_fields_missing");
+      if (timestamp) {
+        const times = values.map((v) => /^\d+$/.test(String(v)) ? Number(v) : Date.parse(v));
+        if (times.some((t) => !Number.isSafeInteger(t) || t < binding.createdAt || t > now + 2000) ||
+            new Set(times).size !== 1) throw new Error("native_take_fill_time_conflict");
+        return times[0];
+      }
+      if (values.some((v) => !equal(v, values[0]))) throw new Error("native_take_fill_alias_conflict");
+      return String(values[0]);
+    };
+    const quantities = [], fees = [], times = [], products = [];
+    const trades = new Set(), assets = new Set();
+    for (const f of linked) {
+      if (f.symbol !== nativeSymbol(binding.symbol) || f.side !== "SELL" || f.positionSide !== "LONG")
+        return { verified: false };
+      if (linked.length > 1) {
+        const trade = id(f, ["tradeId", "tradeID", "fillId", "fillID"]);
+        if (trades.has(trade)) return { verified: false };
+        trades.add(trade);
+      }
+      const quantity = aliases(f, ["qty", "quantity", "volume"]);
+      const price = aliases(f, ["price", "tradePrice", "fillPrice"]);
+      const fee = aliases(f, ["commission", "fee", "commissionAmount", "feeAmount"]);
+      const currencies = ["commissionAsset", "feeAsset", "feeCurrency", "currency"]
+        .map((k) => f[k]).filter((v) => v != null);
+      if (!currencies.length || new Set(currencies).size !== 1 ||
+          !["VST", "USDT"].includes(currencies[0]) || !positive(quantity) || !positive(price))
+        return { verified: false };
+      assets.add(currencies[0]);
+      quantities.push(quantity); fees.push(fee);
+      times.push(aliases(f, ["filledTm", "filledTime", "time", "timestamp", "tradeTime"], true));
+      const q = exactDecimalParts(quantity), p = exactDecimalParts(price);
+      products.push(decimalText(q.units * p.units, q.scale + p.scale));
+    }
+    if (assets.size !== 1 || !equal(sumDecimal(quantities), binding.quantity)) return { verified: false };
+    const total = exactDecimalParts(sumDecimal(products)), quantity = exactDecimalParts(binding.quantity);
+    const average = decimalText(total.units * 10n ** BigInt(quantity.scale + 18) /
+      (quantity.units * 10n ** BigInt(total.scale)), 18);
+    return { verified: true, status: "filled", childOrderId,
+      fill: { orderId: childOrderId, triggerOrderId: binding.orderId,
+        quantity: binding.quantity, price: average,
+        fee: { asset: [...assets][0], amount: sumDecimal(fees) },
+        at: new Date(Math.max(...times)).toISOString() },
+      residualPosition: { verified: true, positionId: binding.positionId, quantity: "0" } };
+  } catch { return { verified: false }; }
+}
+
 export function nativeStopBindings(state) {
   const result = [];
   for (const leg of ["core", "runner"]) {
@@ -230,24 +337,26 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         !positive(state.remainingQty) || !state.exchangePositionId || !state.entryOrderId ||
         !state.accountId || state.marginMode !== "ISOLATED") return;
     if (await store.hasPendingSourceExitRequest?.(record.sourceSignalId)) return;
-    const existing = await store.getIntent(record.sourceSignalId, NATIVE_TAKE_PHASE);
-    if (existing) return;
+    const existing = await store.latestNativeTakeIntent(record.sourceSignalId);
+    if (existing && !["failed", "reconciled"].includes(existing.state)) return;
+    const revision = existing ? Number(existing.request.revision ?? 0) + 1 : 0;
     const takePrice = await native.plan(state.symbol, state.entryPrice);
     const clientOrderId = `nt_${createHash("sha256").update(JSON.stringify([
-      state.accountId, record.sourceSignalId, state.entryOrderId, state.exchangePositionId,
+      state.accountId, record.sourceSignalId, state.entryOrderId, state.exchangePositionId, revision,
     ])).digest("hex").slice(0, 28)}`;
     const binding = { symbol: state.symbol, positionId: state.exchangePositionId,
       entryOrderId: state.entryOrderId, entryPrice: String(state.entryPrice),
       quantity: String(state.remainingQty), takePrice, workingType: "CONTRACT_PRICE",
       clientOrderId, createdAt: Number(clock()) };
     const reservation = await store.reserveIntent({ sourceSignalId: record.sourceSignalId,
-      phase: NATIVE_TAKE_PHASE, clientOrderId, request: {
-        operation: "native_full_take", environment: "vst", accountId: state.accountId, binding,
+      phase: `${NATIVE_TAKE_PHASE}-${revision}`, clientOrderId, request: {
+        operation: "native_full_take", environment: "vst", accountId: state.accountId, binding, revision,
       } });
     if (reservation.kind !== "new") return;
     try {
       const submitted = await native.create(binding, nativeStopBindings(state), async () => {
         await store.markIntent(clientOrderId, "submitted", { outcome: { attempted: true } });
+        native.register(binding);
       });
       await store.markIntent(clientOrderId, "submitted", {
         exchangeOrderId: submitted.orderId, outcome: { attempted: true, binding: submitted },
@@ -263,7 +372,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
   async function reconcile(intent) {
     let binding = { ...intent.request.binding,
       ...(intent.exchangeOrderId ? { orderId: intent.exchangeOrderId } : {}) };
-    if (binding.orderId) native.register(binding);
+    if (intent.state !== "prepared" || binding.orderId) native.register(binding);
     const record = await store.getPosition(intent.sourceSignalId);
     const observation = await native.inspect(binding);
     binding = observation.binding;
@@ -273,11 +382,29 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
       });
     }
     if (observation.positions.length) {
+      if (intent.state === "prepared" && !observation.queried && record?.status === "open") {
+        const submitted = await native.create(binding, nativeStopBindings(record.snapshot), async () => {
+          await store.markIntent(intent.clientOrderId, "submitted", { outcome: { attempted: true } });
+          native.register(binding);
+        });
+        await store.markIntent(intent.clientOrderId, "submitted", {
+          exchangeOrderId: submitted.orderId, outcome: { attempted: true, binding: submitted },
+        });
+        return;
+      }
       if (terminal(observation.queried)) {
         native.remove(binding);
         await store.markIntent(intent.clientOrderId, "failed", {
           exchangeOrderId: binding.orderId ?? null, outcome: { reason: "native_take_cancelled_on_exchange" },
         });
+      } else if (observation.active && !equal(observation.positions[0].positionAmt, binding.quantity)) {
+        const cancelled = await native.cancelWhenFlat(binding, null, true);
+        if (terminal(cancelled)) {
+          native.remove(binding);
+          await store.markIntent(intent.clientOrderId, "failed", {
+            exchangeOrderId: binding.orderId, outcome: { reason: "native_take_resize_after_verified_quantity_change" },
+          });
+        }
       } else if (!observation.active) await report(intent.sourceSignalId,
         new Error("native_take_order_not_confirmed_no_resubmission"));
       return;
@@ -288,7 +415,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     }
     if (observation.queried?.status === "FILLED" && record?.status !== "closed") {
       blocked.add(intent.sourceSignalId);
-      const evidence = await proveFill(binding);
+      const evidence = await proveFill(binding, nativeStopBindings(record.snapshot));
       if (!evidence?.verified || evidence.status !== "filled" ||
           !equal(evidence.fill?.quantity, binding.quantity) ||
           !equal(evidence.residualPosition?.quantity, "0")) return;
@@ -310,7 +437,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         eventKind: "vst_source_exit_closed",
         eventDetail: { reason: FULL_TAKE_REASON, closureOrigin: "native_take_profit",
           positionId: binding.positionId, fill },
-        expectedPositionSnapshot: { ...record.snapshot, symbol: record.symbol, status: record.status },
+        expectedPositionSnapshot: record.snapshot,
         expectedPositionUpdatedAt: record.updatedAt,
       });
       native.remove(binding);

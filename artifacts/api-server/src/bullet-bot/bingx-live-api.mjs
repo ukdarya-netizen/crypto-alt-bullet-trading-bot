@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createCoalescedPriceRead } from "./coalesced-price-read.mjs";
 import { createVstEndpointPacer } from "./vst-endpoint-pacer.mjs";
 import { runControlledVstBracketProbe } from "./vst-bracket-probe.mjs";
+import { createNativeTakeApi } from "./native-full-take.mjs";
 import { refreshVstEntrySizing } from "./vst-fresh-entry-sizing.mjs";
 import { OWNER_POSITION_PROFILE, allocationBudget, normalizePositionProfile } from "./vst-position-profile.mjs";
 import {
@@ -1288,7 +1289,7 @@ export function createBingXLiveApi({
     return request("GET", PATH.balance);
   }
 
-  async function getOpenOrders(symbol) {
+  async function readRawOpenOrders(symbol) {
     const accountWide = symbol === undefined;
     const name = accountWide ? null : symbolName(symbol);
     const data = await request("GET", PATH.openOrders,
@@ -2104,6 +2105,7 @@ export function createBingXLiveApi({
     };
     emitEntryTiming({ boundary: "started" });
     const name = symbolName(symbol);
+    nativeFullTake.assertEntryAllowed(symbol);
     if (environment !== "vst") {
       throw new BingXLiveApiError("VST automated LONG entry is unavailable outside VST");
     }
@@ -8010,7 +8012,21 @@ export function createBingXLiveApi({
     return { symbol: name, status: finalOrder.status, order: finalOrder, fills };
   }
 
+  const nativeFullTake = createNativeTakeApi({
+    assertVst: () => {
+      if (environment !== "vst") throw new BingXLiveApiError("Native full take is VST-only");
+    },
+    readOrders: readRawOpenOrders, readPositions: getPositions, queryOrder,
+    contract, getPositionMode, getMarginType, getLeverage, clock,
+    exactOrderId: (value) => exactOrderIdentifierFrom(value, "native take order ID"),
+    write: (method, params, options) => request(method, PATH.order, params, options),
+  });
+  async function getOpenOrders(symbol) {
+    return nativeFullTake.guardOrders(await readRawOpenOrders(symbol));
+  }
+
   return Object.freeze(instrumentVstApi({
+    ...(environment === "vst" ? { nativeFullTake, getProtectionOrders: getOpenOrders } : {}),
     runControlledVstBracketProbe: (options) => {
       requireVstBtc("BTCUSDT");
       return runControlledVstBracketProbe({
@@ -8036,7 +8052,7 @@ export function createBingXLiveApi({
     getBalance,
     getPositions,
     getPositionMarginHistory,
-    getOpenOrders,
+    getOpenOrders: readRawOpenOrders,
     getPositionMode,
     getLeverage,
     getMarginType,
