@@ -5911,3 +5911,28 @@ test("a close request that failed before sending anything does not lock the posi
   for (let i = 0; i < 10 && store.data.positions[0].status !== "closed"; i++) await worker.tick();
   assert.equal(store.data.positions[0].status, "closed", JSON.stringify(store.data.events.slice(-4)));
 });
+
+test("a native +5% take that can never settle does not keep a flat position open forever", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  // A take manager that owns the position but cannot prove its outcome.
+  const stuckNative = { ...broker, createNativeTakeProfitManager: () => Object.freeze({
+    ensure: async () => {}, sweep: async () => {},
+    blocksPosition: () => true, ownsPosition: () => true,
+  }) };
+  let now = NOW;
+  const worker = createVstWorker({ store, broker: stuckNative, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await worker.tick().catch(() => {});
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  const closedAt = [];
+  for (let offset = 0; offset <= 16 * 60_000; offset += 60_000) {
+    now = NOW + offset;
+    await worker.tick().catch(() => {});
+    if (store.data.positions[0].status === "closed") { closedAt.push(offset); break; }
+  }
+  assert.equal(store.data.positions[0].status, "closed");
+  assert.ok(closedAt[0] >= 10 * 60_000, `not before the take had its grace period: ${closedAt[0]}`);
+});

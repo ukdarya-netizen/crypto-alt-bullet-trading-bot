@@ -1696,6 +1696,8 @@ export function createVstWorker({
   const EXTERNAL_FLAT_MIN_SPAN_MS = 3 * 60_000;
   const EXTERNAL_FLAT_INFLIGHT_MS = 5 * 60_000;
   const externalFlatObservations = new Map(); // sourceSignalId -> { first, last, count }
+  const NATIVE_TAKE_FLAT_GRACE_MS = 10 * 60_000;
+  const nativeTakeFlatSince = new Map(); // sourceSignalId -> first flat observation while a native take owns it
 
   async function reconcileExternallyFlatPositions(openPositions, accountState, unresolved) {
     if (typeof store.closeVerifiedFlatPosition !== "function") return null;
@@ -1709,16 +1711,29 @@ export function createVstWorker({
       return null;
     }
     const now = Number(clock());
+    for (const id of [...nativeTakeFlatSince.keys()]) {
+      if (!live.has(id)) nativeTakeFlatSince.delete(id);
+    }
     for (const record of openPositions) {
       const state = record?.snapshot;
-      if (nativeTakeProfit?.blocksPosition(record?.sourceSignalId) ||
-          nativeTakeProfit?.ownsPosition(record?.sourceSignalId)) continue;
       if (!["open", "closing", "unknown"].includes(record?.status) ||
           state?.environment !== "vst" || state?.accountId !== accountState.accountId ||
           !isCanonicalVstSymbol(record.symbol)) continue;
       const symbolKey = normalizeSymbolKey(record.symbol);
       const flat = flatPositionFromAccountState(accountState, record.symbol) &&
         (symbolOrders(accountState, record.symbol) ?? [null]).length === 0;
+      // The native +5% take settles its own closes first. But a take whose
+      // settlement cannot finish (fill not provable, order state unknown) used
+      // to own the position forever: it was gone from the exchange yet stayed
+      // open in the ledger (TOSHI, 2026-10-26). After a grace period of
+      // continuous flatness the ordinary external-flat proof below applies.
+      if (nativeTakeProfit?.blocksPosition(record?.sourceSignalId) ||
+          nativeTakeProfit?.ownsPosition(record?.sourceSignalId)) {
+        if (!flat) { nativeTakeFlatSince.delete(record.sourceSignalId); continue; }
+        const since = nativeTakeFlatSince.get(record.sourceSignalId) ?? now;
+        nativeTakeFlatSince.set(record.sourceSignalId, since);
+        if (now - since < NATIVE_TAKE_FLAT_GRACE_MS) continue;
+      }
       const inFlight = unresolved.some((intent) =>
         (intent.sourceSignalId === record.sourceSignalId || intentBlocksSymbol(intent, symbolKey)) &&
         ["prepared", "submitted"].includes(intent.state) &&
