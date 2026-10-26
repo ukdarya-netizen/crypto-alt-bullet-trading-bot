@@ -13904,14 +13904,35 @@ export function createVstWorker({
         sourceSignalId: row.sourceSignalId, symbol: row.symbol };
     }
     const state = record.snapshot;
-    if (state.sourceExitEvidence &&
-        JSON.stringify(state.sourceExitEvidence) !== JSON.stringify(row.evidence)) {
-      return { kind: "blocked", reason: "source_exit_position_provenance_changed",
-        sourceSignalId: row.sourceSignalId, symbol: row.symbol };
-    }
-    if (state.sourceExitRequestId && state.sourceExitRequestId !== row.requestId) {
-      return { kind: "blocked", reason: "source_exit_position_has_different_request",
-        sourceSignalId: row.sourceSignalId, symbol: row.symbol };
+    // A position stays bound to an earlier close request only while that
+    // request's close was actually sent (an intent exists and has not failed).
+    // A request that failed its preflight before sending anything used to
+    // bind the position forever: every later close -- the +5% take with
+    // re-derived evidence, or the source's own exit -- was refused as
+    // "provenance changed" and the position could never be closed by the bot
+    // (TOSHI, 2026-10-26, untouched by hand).
+    const boundElsewhere = (state.sourceExitEvidence &&
+        JSON.stringify(state.sourceExitEvidence) !== JSON.stringify(row.evidence)) ||
+      (state.sourceExitRequestId && state.sourceExitRequestId !== row.requestId);
+    if (boundElsewhere) {
+      let boundIntent = null;
+      if (state.sourceExitRequestId) {
+        try {
+          boundIntent = await store.getIntent(row.sourceSignalId,
+            sourceExitPhase(state.sourceExitRequestId));
+        } catch {
+          boundIntent = { state: "unreadable" };
+        }
+      }
+      if (!state.sourceExitRequestId || (boundIntent && boundIntent.state !== "failed")) {
+        return { kind: "blocked",
+          reason: state.sourceExitEvidence &&
+            JSON.stringify(state.sourceExitEvidence) !== JSON.stringify(row.evidence)
+            ? "source_exit_position_provenance_changed"
+            : "source_exit_position_has_different_request",
+          sourceSignalId: row.sourceSignalId, symbol: row.symbol };
+      }
+      // Nothing was sent for the earlier request: this request takes over.
     }
     const phase = sourceExitPhase(row.requestId);
     const existing = await store.getIntent(row.sourceSignalId, phase);

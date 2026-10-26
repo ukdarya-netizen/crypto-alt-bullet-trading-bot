@@ -5891,3 +5891,23 @@ test("a +5% close that fails on every tick never crashes ticks or starves a fres
   assert.ok(store.data.intents.some((row) => row.request.operation === "close_leg"),
     "the +5% close is still attempted");
 });
+
+test("a close request that failed before sending anything does not lock the position against the +5% take", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const position = store.data.positions[0];
+  position.snapshot = { ...position.snapshot,
+    sourceExitEvidence: { rule: "source_close", observedPrice: "103" },
+    sourceExitRequestId: "earlier-request-never-sent",
+    sourceExitBlockReason: "source_exit_position_preflight_failed" };
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  const watched = { ...broker, readLastPrices: async (symbols) => symbols.map((symbol) => ({
+    verified: true, symbol, price: 105, priceDecimal: "105",
+    observedAt: new Date(NOW - 1_000).toISOString(), source: "last_trade",
+  })) };
+  const worker = createVstWorker({ store, broker: watched, clock: () => NOW,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  for (let i = 0; i < 10 && store.data.positions[0].status !== "closed"; i++) await worker.tick();
+  assert.equal(store.data.positions[0].status, "closed", JSON.stringify(store.data.events.slice(-4)));
+});
