@@ -13610,7 +13610,16 @@ export function createVstWorker({
         exactExchangeIdentifier(activeRows[0].positionId ?? activeRows[0].positionID) !==
           state.exchangePositionId ||
         activeRows[0].positionSide !== "LONG") {
-      throw new Error("source_exit_exchange_position_identity_mismatch");
+      // Say exactly what the exchange showed: it is stored as the position's
+      // block reason and is the only way to tell "already flat", "two rows"
+      // and "new position ID" apart without another log hunt.
+      const seen = activeRows.map((row) =>
+        `${row.positionSide ?? "?"}:${exactExchangeIdentifier(row.positionId ?? row.positionID) ?? "?"}`)
+        .join("+") || "none";
+      const symbolOrderCount = accountState.openOrders.filter((row) =>
+        normalizeSymbolKey(row?.symbol) === normalizeSymbolKey(state.symbol)).length;
+      throw new Error(`source_exit_exchange_position_identity_mismatch:rows=${activeRows.length}` +
+        `,exchange=${seen},ledger=${state.exchangePositionId},orders=${symbolOrderCount}`);
     }
     const actualQuantity = String(activeRows[0].positionAmt ?? activeRows[0].quantity);
     if (!Number.isFinite(Number(actualQuantity)) || Number(actualQuantity) <= 0 ||
