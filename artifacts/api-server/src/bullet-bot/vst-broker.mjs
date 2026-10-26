@@ -763,6 +763,7 @@ export function createVstBroker({
     invalidatePositionMarketProofs();
     successfulLookupProbe = null;
     capabilitySettingsMemo.clear();
+    settingsMemo.clear();
     return api[method](...args);
   }
 
@@ -783,6 +784,20 @@ export function createVstBroker({
     if (code === 100410 || code === 109500) return true;
     return error?.name === "BingXLiveApiError" &&
       ["exchange_response", "network_request", "pre_transport"].includes(error?.transportStage);
+  }
+
+  function settingsFromPositionRow(positions, symbol) {
+    const name = symbolName(symbol);
+    const rows = (Array.isArray(positions) ? positions : []).filter((row) =>
+      row?.symbol === name && row.positionSide === "LONG" && Number(row.positionAmt) !== 0);
+    if (rows.length !== 1 || typeof rows[0].isolated !== "boolean") return null;
+    const lev = Number(rows[0].leverage);
+    if (!Number.isFinite(lev) || lev <= 0) return null;
+    return {
+      symbol,
+      marginMode: rows[0].isolated ? "ISOLATED" : "CROSSED",
+      leverage: { longLeverage: lev, fromPositionRow: true },
+    };
   }
 
   async function readCapabilitySymbolSettings(symbol, now) {
@@ -885,7 +900,7 @@ export function createVstBroker({
     const entryId = exactIdentifier(entryOrderId, "margin_top_up_entry_order_id");
     await assertVstEnvironment(symbol);
     const [settings, rows, orders, accountRows] = await Promise.all([
-      readSettings(symbol),
+      readSettings(symbol, { fresh: true }),
       api.getPositions(symbol),
       api.getOpenOrders(symbol),
       readGlobalAccountRows(),
@@ -2409,13 +2424,33 @@ export function createVstBroker({
     }
   }
 
-  async function readSettings(symbol) {
+  // BingX allows only 2 requests/s per UID on /trade/marginType (query AND
+  // switch share it) and trips a multi-minute "disabled period" (100410)
+  // when exceeded. Reading margin type + leverage for every open position on
+  // every management pass did exactly that (2026-10-26: COMP, FLUID, OPN).
+  // Margin mode and leverage change only through this bot's own mutations
+  // (each clears the memo) or by hand, so verified settings are reused for
+  // SETTINGS_MEMO_TTL_MS. Every mutation path reads them fresh.
+  const settingsMemo = new Map();
+  const SETTINGS_MEMO_TTL_MS = 10 * 60_000;
+  async function readSettings(symbol, { fresh = false } = {}) {
     assertSymbol(symbol);
+    const now = Number(clock());
+    const cached = settingsMemo.get(symbol);
+    if (!fresh && cached && Number.isFinite(now) && now >= cached.at &&
+        now - cached.at < SETTINGS_MEMO_TTL_MS) {
+      const mode = await readCoalesced("getPositionMode");
+      return { mode, marginMode: cached.marginMode, leverage: cached.leverage };
+    }
     const [mode, marginMode, leverage] = await Promise.all([
       api.getPositionMode(),
       api.getMarginType(symbol),
       api.getLeverage(symbol),
     ]);
+    if (["ISOLATED", "CROSSED"].includes(marginMode) &&
+        Number.isFinite(Number(leverage?.longLeverage)) && Number.isFinite(now)) {
+      settingsMemo.set(symbol, { at: now, marginMode, leverage });
+    }
     return { mode, marginMode, leverage };
   }
 
@@ -9259,7 +9294,7 @@ export function createVstBroker({
       }
     }
     if (request?.operation === "set_isolated_leverage") {
-      const settings = await readSettings(request.symbol);
+      const settings = await readSettings(request.symbol, { fresh: true });
       const position = await readPosition(request.symbol, {
         persistedPosition: positionSnapshotFromRequest(request) ?? undefined,
       });
@@ -9528,7 +9563,7 @@ export function createVstBroker({
     }
 
     if (request.operation === "set_isolated_leverage") {
-      const settings = await readSettings(symbol);
+      const settings = await readSettings(symbol, { fresh: true });
       if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN) {
         throw new Error("bingx_vst_hedge_isolated_margin_must_be_exchange_verified");
       }
@@ -9545,7 +9580,7 @@ export function createVstBroker({
           Number(request.leverage) !== PROFILE_LEVERAGE) {
         throw new Error("bingx_vst_entry_request_not_supported");
       }
-      const settings = await readSettings(symbol);
+      const settings = await readSettings(symbol, { fresh: true });
       if (settings.mode !== "HEDGE" || settings.marginMode !== PROFILE_MARGIN ||
           Number(settings.leverage.longLeverage) !== PROFILE_LEVERAGE) {
         throw new Error("bingx_vst_entry_requires_verified_hedge_isolated_long10");
@@ -10354,6 +10389,11 @@ export function createVstBroker({
       // it is not managed/mutated until a later read proves its settings,
       // while every other symbol and new entries keep working.
       mapWithConcurrency(probeSymbols, 3, async (symbol) => {
+        // An open LONG position already carries its margin mode and leverage
+        // in the positions read above (fields `isolated`, `leverage`): no
+        // extra marginType/leverage request per open symbol and tick.
+        const fromRow = settingsFromPositionRow(positions, symbol);
+        if (fromRow) return fromRow;
         try {
           return await readCapabilitySymbolSettings(symbol, historyWindowNow);
         } catch (error) {

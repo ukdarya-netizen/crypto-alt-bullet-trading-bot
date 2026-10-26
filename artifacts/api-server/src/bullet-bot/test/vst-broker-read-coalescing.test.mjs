@@ -389,3 +389,17 @@ test("a rate-limited settings read of one open symbol quarantines that symbol, n
   await assert.rejects(fixture.broker.getCapabilities(), /local bug/,
     "a non-exchange error still fails closed");
 });
+
+test("open positions carry their margin mode and leverage: no marginType/leverage request per tick", async () => {
+  const fixture = capabilityFixture();
+  fixture.setAccountState([
+    { symbol: "BTC-USDT", positionSide: "LONG", positionAmt: "0.1", avgPrice: "100",
+      positionId: "position-btc", isolated: true, leverage: 10 },
+    { symbol: "ETH-USDT", positionSide: "LONG", positionAmt: "0.1", avgPrice: "100",
+      positionId: "position-eth", isolated: true, leverage: 10 },
+  ]);
+  for (let i = 0; i < 3; i++) await fixture.broker.getCapabilities();
+  const count = (name) => fixture.calls.filter((call) => call.name === name).length;
+  assert.equal(count("marginType"), 0, "BingX allows 2/s on marginType and blocks the endpoint for minutes");
+  assert.equal(count("leverage"), 0);
+});

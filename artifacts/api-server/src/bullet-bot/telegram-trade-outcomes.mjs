@@ -104,6 +104,7 @@ export function takeCloseReasonText(reason) {
 }
 
 const NOT_OPENED_REASONS = [
+  [/100410/, "BingX временно ограничил частые запросы (лимит API биржи)"],
   [/^signal_expired/, "сигнал устарел до входа"],
   [/^source_withdrawn|^source_entry_cancelled/, "сигнал отменён источником"],
   [/^not_a_fresh_approved_v2_long$/, "сигнал не прошёл проверку (не свежий лонг)"],

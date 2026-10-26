@@ -288,3 +288,11 @@ test("an expired signal says what kept the bot from entering", () => {
     "Бот не мог начать вход: BingX не подтвердил состояние счёта (ошибка чтения биржи)",
   ].join("\n"));
 });
+
+test("a BingX rate-limit refusal is named in plain words", () => {
+  const row = event("vst_worker_error", { symbol: "OPNUSDT", detail: {
+    reason: "BingX request failed GET openApiswapv2trademarginType, HTTP 200, code 100410, msg: code:100410:The endpoint trigger freq",
+    stage: "before_entry",
+  } });
+  assert.match(formatVstTradeOutcome(row), /Причина: BingX временно ограничил частые запросы/);
+});
