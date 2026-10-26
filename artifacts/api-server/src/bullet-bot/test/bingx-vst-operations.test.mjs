@@ -5907,3 +5907,13 @@ test("known flat-stop cancellation requires persisted identity proof and never r
   );
   assert.equal(mainnet.calls.length, 0);
 });
+test("margin type reads are cached, coalesced and refreshed by positions reads (BingX 2/s, 100410 block)", async () => {
+  const f = fixture({ symbol: "ETH-USDT", dualSidePosition: true, marginType: "ISOLATED" });
+  const gets = () => f.calls.filter(({ url, options }) =>
+    url.pathname.endsWith("/trade/marginType") && options.method === "GET").length;
+  const results = await Promise.all([f.api.getMarginType("ETHUSDT"), f.api.getMarginType("ETHUSDT")]);
+  assert.deepEqual(results, ["ISOLATED", "ISOLATED"]);
+  assert.equal(gets(), 1, "concurrent reads share one request");
+  assert.equal(await f.api.getMarginType("ETHUSDT"), "ISOLATED");
+  assert.equal(gets(), 1, "a recent value is reused");
+});

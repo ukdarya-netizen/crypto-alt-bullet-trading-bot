@@ -934,7 +934,13 @@ export function createBingXLiveApi({
             throw new TypeError("beforeSign must be a function");
           }
           try {
-            await beforeSign();
+            // Final pre-sign guards always read margin type natively.
+            freshMarginTypeDepth += 1;
+            try {
+              await beforeSign();
+            } finally {
+              freshMarginTypeDepth -= 1;
+            }
           } catch (error) {
             const wrapped = new BingXLiveApiError("BingX final pre-sign check failed", {
               transportStage: "pre_transport",
@@ -1282,6 +1288,7 @@ export function createBingXLiveApi({
     const data = await request("GET", PATH.positions, symbol
       ? { symbol: symbolName(symbol) } : {});
     if (!Array.isArray(data)) throw new BingXLiveApiError("BingX returned invalid positions data");
+    rememberMarginTypesFromPositions(data);
     return data;
   }
 
@@ -1624,15 +1631,80 @@ export function createBingXLiveApi({
     return { longLeverage, shortLeverage, maxPositionLongVal };
   }
 
+  // /trade/marginType: BingX allows 2 requests/s per UID (query and switch
+  // share it) and blocks the endpoint for minutes on a breach (100410). On
+  // VST it tripped even with ~1 request/s (2026-10-26: 50 refusals in 30 min),
+  // because every order/stop/close operation reads it before and after.
+  // Margin type changes only through this client's POST (which updates the
+  // cache) or by hand, and BingX refuses a switch while a position is open,
+  // so a value seen within MARGIN_TYPE_TTL_MS is reused; concurrent reads
+  // share one request; a fresh read waits for MARGIN_TYPE_GAP_MS since the
+  // previous one; after a 100410 the endpoint rests MARGIN_TYPE_COOLDOWN_MS
+  // and a value up to MARGIN_TYPE_STALE_MS old is used meanwhile. Positions
+  // reads refresh it for free (field `isolated`).
+  const MARGIN_TYPE_TTL_MS = 120_000;
+  const MARGIN_TYPE_STALE_MS = 15 * 60_000;
+  const MARGIN_TYPE_GAP_MS = 1_500;
+  const MARGIN_TYPE_COOLDOWN_MS = 60_000;
+  const marginTypeCache = new Map(); // name -> { value, at }
+  let freshMarginTypeDepth = 0;
+  const marginTypeInFlight = new Map();
+  let marginTypeNextAt = 0;
+  let marginTypeCooldownUntil = 0;
+  function rememberMarginType(name, value) {
+    if (value === "ISOLATED" || value === "CROSSED") {
+      marginTypeCache.set(name, { value, at: Number(clock()) });
+    }
+  }
+  function rememberMarginTypesFromPositions(rows) {
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      if (row && typeof row.symbol === "string" && typeof row.isolated === "boolean" &&
+          Number(row.positionAmt) !== 0) {
+        rememberMarginType(row.symbol, row.isolated ? "ISOLATED" : "CROSSED");
+      }
+    }
+  }
   async function getMarginType(symbol) {
     const name = symbolName(symbol);
-    const data = await request("GET", PATH.marginType, { symbol: name });
-    const marginType = typeof data?.marginType === "string"
-      ? data.marginType.toUpperCase() : null;
-    if (marginType !== "ISOLATED" && marginType !== "CROSSED") {
-      throw new BingXLiveApiError(`BingX returned invalid margin type for ${name}`);
+    const now = Number(clock());
+    const cached = marginTypeCache.get(name);
+    const fresh = freshMarginTypeDepth > 0;
+    if (!fresh && cached && now - cached.at < MARGIN_TYPE_TTL_MS) return cached.value;
+    if (!fresh && now < marginTypeCooldownUntil && cached && now - cached.at < MARGIN_TYPE_STALE_MS) {
+      return cached.value;
     }
-    return marginType;
+    if (!fresh && marginTypeInFlight.has(name)) return marginTypeInFlight.get(name);
+    const read = (async () => {
+      const wait = Math.max(marginTypeNextAt, marginTypeCooldownUntil) - Number(clock());
+      if (wait > 0) await sleep(wait);
+      marginTypeNextAt = Number(clock()) + MARGIN_TYPE_GAP_MS;
+      let data;
+      try {
+        data = await request("GET", PATH.marginType, { symbol: name });
+      } catch (error) {
+        if (Number(error?.code) === 100410) {
+          marginTypeCooldownUntil = Number(clock()) + MARGIN_TYPE_COOLDOWN_MS;
+          const stale = marginTypeCache.get(name);
+          if (stale && Number(clock()) - stale.at < MARGIN_TYPE_STALE_MS) return stale.value;
+        }
+        throw error;
+      }
+      const marginType = typeof data?.marginType === "string"
+        ? data.marginType.toUpperCase() : null;
+      if (marginType !== "ISOLATED" && marginType !== "CROSSED") {
+        throw new BingXLiveApiError(`BingX returned invalid margin type for ${name}`);
+      }
+      rememberMarginType(name, marginType);
+      return marginType;
+    })();
+    if (fresh) return read;
+    marginTypeInFlight.set(name, read);
+    try {
+      return await read;
+    } finally {
+      marginTypeInFlight.delete(name);
+    }
   }
 
   async function preflight(symbol, {
@@ -7868,6 +7940,7 @@ export function createBingXLiveApi({
         let alreadyTarget = false;
         let safetyRefusal = null;
         try {
+          marginTypeCache.delete(name);
           await request("POST", PATH.marginType, {
             symbol: name, marginType: PROFILE_MARGIN,
           }, {
@@ -7898,6 +7971,8 @@ export function createBingXLiveApi({
               submittedVstIsolatedMarginSymbols.add(name);
             },
           });
+          // The pre-sign guard cached the old mode; the final check must read the new one.
+          marginTypeCache.delete(name);
           lastError = null;
           break;
         } catch (error) {
