@@ -5857,3 +5857,37 @@ test("a symbol that is only briefly flat is not closed", async () => {
   now = NOW + 200_000; await worker.tick().catch(() => {});
   assert.notEqual(store.data.positions[0].status, "closed", "the flat streak was interrupted and restarted");
 });
+
+test("a +5% close that fails on every tick never crashes ticks or starves a fresh entry", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  let now = NOW;
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => now, true);
+  const failing = { ...broker,
+    readLastPrices: async (symbols) => symbols.map((symbol) => ({
+      verified: true, symbol, price: 105, priceDecimal: "105",
+      observedAt: new Date(now - 1_000).toISOString(), source: "last_trade",
+    })),
+    performIntent: async (input) => {
+      if (input.request?.operation === "close_leg") throw new Error("bingx_close_transport_failed");
+      return broker.performIntent(input);
+    } };
+  let scans = 0;
+  store.listPendingCandidates = async () => {
+    scans += 1;
+    const row = await store.getPending();
+    return row ? [row] : [];
+  };
+  const worker = createVstWorker({ store, broker: failing, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  await worker.enqueue({ ...confirmedImpulseSignal("BTCUSDT", "fresh-while-take-fails"),
+    signalAt: new Date(now - 1_000).toISOString() });
+  for (let i = 0; i < 12; i++) {
+    await worker.runOnce(); // must never throw
+    now += 5_000;
+  }
+  assert.ok(scans > 0, "the fresh signal reached the entry scan within a minute");
+  assert.ok(store.data.intents.some((row) => row.request.operation === "close_leg"),
+    "the +5% close is still attempted");
+});

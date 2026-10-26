@@ -1822,6 +1822,7 @@ export function createVstWorker({
   }
 
   const MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS = 2;
+  const FULL_TAKE_RETRY_AFTER_ACT_MS = 9_000;
   let managementRotation = 0;
   async function freshEntryWaiting() {
     if (typeof store.getPending !== "function") return false;
@@ -1831,7 +1832,24 @@ export function createVstWorker({
         isFreshSignalAt(next.body?.signalAt, Number(clock()));
     } catch { return false; }
   }
+  // Entry fairness. A fresh signal must reach the entry scan within
+  // ENTRY_STARVATION_MS no matter what other work keeps returning early: a
+  // +5% close that fails on every tick (TOSHI, 2026-10-26) or a position whose
+  // management "acts" on every tick used to end every tick before the entry
+  // scan, so every new signal expired untouched. While a fresh signal has
+  // waited that long, this tick skips latched-take and position management
+  // (exchange stop-losses stay; both resume on the next tick) and goes
+  // straight to the entry scan with all of its own checks.
+  const ENTRY_STARVATION_MS = 15_000;
+  let lastEntryScanAt = Number(clock());
+  let entryStarvedThisTick = false;
+  async function entryStarved() {
+    const now = Number(clock());
+    if (!Number.isFinite(now) || now - lastEntryScanAt < ENTRY_STARVATION_MS) return false;
+    return freshEntryWaiting();
+  }
   async function positionsToManageThisTick(openPositions) {
+    if (entryStarvedThisTick) return [];
     if (openPositions.length <= MANAGED_POSITIONS_PER_TICK_WHILE_ENTRY_WAITS ||
         !(await freshEntryWaiting())) return openPositions;
     const start = managementRotation % openPositions.length;
@@ -1885,7 +1903,12 @@ export function createVstWorker({
             symbol, sourceSignalId: record.sourceSignalId });
           await noteFullTakeProgress(record, "full_take_close_exception",
             { error: error instanceof Error ? error.message.slice(0, 160) : undefined });
-          if (exchangeActionAttemptedThisTick) throw error;
+          fullTakeProgressFor(record.sourceSignalId).retryAt = Number(clock()) + FULL_TAKE_RETRY_AFTER_ACT_MS;
+          // A failed close used to rethrow and crash the WHOLE tick (no entry
+          // could ever be reached). Keep the mutation boundary, not the crash.
+          if (exchangeActionAttemptedThisTick) {
+            return { kind: "acted", operation: "full_take_close_attempted" };
+          }
           continue;
         } finally {
           completed = directCloseCompletion?.completed ?? null;
@@ -1895,9 +1918,11 @@ export function createVstWorker({
           fullTakeLatches.delete(record.sourceSignalId);
           fullTakeProgress.delete(record.sourceSignalId);
         } else {
-          if (result?.kind !== "acted" && !exchangeActionAttemptedThisTick) {
-            fullTakeProgressFor(record.sourceSignalId).retryAt = Number(clock()) + 30_000;
-          }
+          // Not completed: the next attempt waits (30 s after a refusal, a few
+          // ticks after a sent close) so the take cannot occupy every tick.
+          fullTakeProgressFor(record.sourceSignalId).retryAt = Number(clock()) +
+            (result?.kind !== "acted" && !exchangeActionAttemptedThisTick
+              ? 30_000 : FULL_TAKE_RETRY_AFTER_ACT_MS);
           await noteFullTakeProgress(record,
             completed?.detail?.reason ?? result?.reason ?? result?.operation ?? result?.kind,
             { kind: result?.kind, operation: result?.operation,
@@ -14454,7 +14479,14 @@ export function createVstWorker({
       return { kind: "paused", reason: "vst_execution_paused" };
     }
     return store.withLeaderLock(async () => {
-      if (nativeTakeProfit) await nativeTakeProfit.sweep();
+      // A native-take read failure must never crash the tick (and with it
+      // every entry); the sweep reports per position and runs again next tick.
+      if (nativeTakeProfit) {
+        try { await nativeTakeProfit.sweep(); } catch (error) {
+          recordVstDiagnostic(error, { stage: "nativeTakeSweep", operation: "native_take_sweep" });
+        }
+      }
+      entryStarvedThisTick = await entryStarved();
       exchangeActionAttemptedThisTick = false;
       historicalProofAttemptedThisTick = false;
       positionIssuesThisTick.clear();
@@ -14492,8 +14524,9 @@ export function createVstWorker({
         );
         if (sourceResult) return sourceResult;
       }
-      // Latched +5% takes close before any other position or entry work.
-      const fullTakeResult = await processLatchedFullTakes(recordTiming);
+      // Latched +5% takes close before any other position or entry work,
+      // except on a tick reserved for a starved fresh entry (see entryStarved).
+      const fullTakeResult = entryStarvedThisTick ? null : await processLatchedFullTakes(recordTiming);
       if (fullTakeResult) return fullTakeResult;
       let stageStarted = performance.now();
       const assessment = await inspectCapabilities(broker, recordTiming);
@@ -15041,6 +15074,7 @@ export function createVstWorker({
       let scanCandidateCount = 0;
       let pendingBatchBoundary = false;
       const scanStarted = performance.now();
+      lastEntryScanAt = Number(clock());
       while (true) {
         let page = null;
         let pendingCandidates;
