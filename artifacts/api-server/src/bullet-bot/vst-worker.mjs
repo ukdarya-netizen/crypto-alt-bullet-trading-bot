@@ -7053,7 +7053,11 @@ export function createVstWorker({
     }
     const impulseCapability = capabilities.missingCapabilities?.find?.((item) =>
       item?.capability === "impulse_runner_stop_and_partial_close");
-    if (signal.patternId === "impulse_buy" &&
+    // The split/runner capability is needed only when the bot itself runs
+    // the impulse split. Under source authority (production) an impulse
+    // entry is managed like any other position (see openSignal: no split
+    // phases), so a whole-account split check must not reject it.
+    if (signal.patternId === "impulse_buy" && strategyAuthority !== "source" &&
         (impulseCapability ||
          !Array.isArray(capabilities.features) ||
          !capabilities.features.includes("impulse_runner_stop_and_partial_close"))) {

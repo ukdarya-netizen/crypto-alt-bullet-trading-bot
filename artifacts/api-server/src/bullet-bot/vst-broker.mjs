@@ -776,6 +776,15 @@ export function createVstBroker({
   // its own settings before signing.
   const capabilitySettingsMemo = new Map();
   const capabilitySettingsMemoTtlMs = 60_000;
+  // Exchange-side, per-request failures of a settings READ: rate limit
+  // (100410), VST busy (109500), transport/timeouts. Never a local bug.
+  function isTransientSymbolSettingsError(error) {
+    const code = Number(error?.code);
+    if (code === 100410 || code === 109500) return true;
+    return error?.name === "BingXLiveApiError" &&
+      ["exchange_response", "network_request", "pre_transport"].includes(error?.transportStage);
+  }
+
   async function readCapabilitySymbolSettings(symbol, now) {
     const cached = capabilitySettingsMemo.get(symbol);
     if (cached && Number.isFinite(now) && now >= cached.at &&
@@ -10338,8 +10347,20 @@ export function createVstBroker({
       }),
       // Position mode is account-wide, not per-symbol.
       readCoalesced("getPositionMode"),
-      mapWithConcurrency(probeSymbols, 3, (symbol) =>
-        readCapabilitySymbolSettings(symbol, historyWindowNow)),
+      // One symbol's settings read failing (BingX 100410 rate limit on
+      // marginType/leverage with several open positions, 2026-10-26) used to
+      // fail the WHOLE capability check, so no signal could enter. Now only
+      // that symbol is left unverified for this tick (unverifiedSymbols):
+      // it is not managed/mutated until a later read proves its settings,
+      // while every other symbol and new entries keep working.
+      mapWithConcurrency(probeSymbols, 3, async (symbol) => {
+        try {
+          return await readCapabilitySymbolSettings(symbol, historyWindowNow);
+        } catch (error) {
+          if (!isTransientSymbolSettingsError(error)) throw error;
+          return { symbol, marginMode: null, leverage: null, readFailed: true };
+        }
+      }),
     ]);
     reportTiming("capabilityHistoryAndSymbolReads", stageStarted);
     const settingsBySymbol = symbolReads.map(({ marginMode, leverage }) =>
@@ -10357,9 +10378,9 @@ export function createVstBroker({
       if (settings.mode !== "HEDGE" ||
           !["ISOLATED", "CROSSED"].includes(settings.marginMode)) return false;
       if (settings.marginMode !== PROFILE_MARGIN && !hasIsolatedMarginPreparation) return false;
-      if (Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE) return true;
+      if (Number(settings.leverage?.longLeverage) === PROFILE_LEVERAGE) return true;
       return accountFlatWithoutOrders &&
-        Number(settings.leverage.longLeverage) > 0;
+        Number(settings.leverage?.longLeverage) > 0;
     });
     const canEnter = accountFlatWithoutOrders && canPrepareSettings;
     // Empty recent windows are valid: no prior trade is required for the
@@ -10544,7 +10565,7 @@ export function createVstBroker({
           if (index < 0) return false;
           const settings = settingsBySymbol[index];
           return settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
-            Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE;
+            Number(settings.leverage?.longLeverage) === PROFILE_LEVERAGE;
         })()
       // Many symbols can each carry their own independently verified
       // position concurrently -- every active symbol must pass this check
@@ -10560,7 +10581,7 @@ export function createVstBroker({
           row.symbol === symbolNameValue);
         const matchingOrders = accountOrders.filter((row) =>
           row.symbol === symbolNameValue);
-        return Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+        return Number(settings.leverage?.longLeverage) === PROFILE_LEVERAGE &&
           settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
           verifiedActiveLongProtection(symbol, matchingPositions, matchingOrders);
       }) && accountOrders.every((row) => activeSymbolSet.has(row.symbol));
@@ -10576,7 +10597,7 @@ export function createVstBroker({
       if (index < 0) return true;
       const settings = settingsBySymbol[index];
       const name = symbolName(symbol);
-      return !(Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+      return !(Number(settings.leverage?.longLeverage) === PROFILE_LEVERAGE &&
         settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
         verifiedActiveLongProtection(symbol,
           activePositions.filter((row) => row.symbol === name),
@@ -10609,7 +10630,7 @@ export function createVstBroker({
           row.symbol === name);
         const matchingOrders = accountOrders.filter((row) =>
           row.symbol === name);
-        return Number(settings.leverage.longLeverage) === PROFILE_LEVERAGE &&
+        return Number(settings.leverage?.longLeverage) === PROFILE_LEVERAGE &&
           settings.mode === "HEDGE" && settings.marginMode === PROFILE_MARGIN &&
           verifiedActiveLongProtection(symbol, matchingPositions, matchingOrders);
       });

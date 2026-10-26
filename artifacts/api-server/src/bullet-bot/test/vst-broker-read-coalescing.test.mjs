@@ -363,3 +363,29 @@ test("verified symbol settings memo expires and never keeps a mismatch", async (
   await f.broker.getCapabilities();
   assert.equal(count("leverage"), 4, "a non-10x read is never memoized");
 });
+
+test("a rate-limited settings read of one open symbol quarantines that symbol, not the whole capability check", async () => {
+  const fixture = capabilityFixture();
+  fixture.setAccountState([
+    { symbol: "BTC-USDT", positionSide: "LONG", positionAmt: "0.1", avgPrice: "100", positionId: "position-btc" },
+    { symbol: "ETH-USDT", positionSide: "LONG", positionAmt: "0.1", avgPrice: "100", positionId: "position-eth" },
+  ]);
+  const original = fixture.api.getMarginType;
+  fixture.api.getMarginType = async (symbol, ...rest) => {
+    if (symbol === "ETHUSDT") {
+      const error = new Error("BingX rate limit");
+      error.name = "BingXLiveApiError";
+      error.code = 100410;
+      error.transportStage = "exchange_response";
+      throw error;
+    }
+    return original(symbol, ...rest);
+  };
+  const capabilities = await fixture.broker.getCapabilities();
+  assert.ok(capabilities.unverifiedSymbols.includes("ETHUSDT"));
+  assert.ok(capabilities.features.includes("atomic_protected_market_entry"),
+    "new entries on other symbols are not blocked");
+  fixture.api.getMarginType = async () => { throw new TypeError("local bug"); };
+  await assert.rejects(fixture.broker.getCapabilities(), /local bug/,
+    "a non-exchange error still fails closed");
+});
