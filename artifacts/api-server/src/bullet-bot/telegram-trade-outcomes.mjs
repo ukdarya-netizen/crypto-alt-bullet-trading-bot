@@ -134,6 +134,7 @@ const BLOCKED_BY_TEXT = {
   verified_mutation_capabilities_unavailable: "BingX не подтвердил состояние счёта",
   source_exit_queue_unavailable: "очередь закрытий недоступна",
   unresolved_vst_order_intents: "по прошлой сделке не завершена сверка с биржей",
+  entry_market_mark_not_corroborated: "маркировочная цена VST расходилась с ценой в стакане",
 };
 
 export function notOpenedReasonText(reason) {

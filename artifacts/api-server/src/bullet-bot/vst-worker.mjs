@@ -656,6 +656,13 @@ function intentBlocksSymbolClose(intent, symbolKey) {
     intentBlocksSymbol(intent, symbolKey);
 }
 
+function isRetryableEntryMarkError(error) {
+  return error instanceof Error && (
+    typeof error.vstMarkPairRetryReason === "string" ||
+    /^VST mark (is not corroborated by a fresh quote|became stale|or ticker became stale)/
+      .test(error.message));
+}
+
 function isFreshSignalAt(signalAt, now) {
   const signalTime = Date.parse(signalAt);
   return Number.isFinite(signalTime) &&
@@ -7501,6 +7508,15 @@ export function createVstWorker({
       try {
         entryReserved = Boolean(await store.getIntent(signal.sourceSignalId, "market-entry"));
       } catch { /* unknown -> stay silent rather than claim not opened */ }
+      // A momentary VST mark/quote mismatch before anything was bought is a
+      // read that may pass a few seconds later, not a verdict on the signal
+      // (CP 2026-10-27: "VST mark is not corroborated by a fresh quote" ended
+      // the signal for good). Keep it pending; the normal freshness window
+      // still retires it, with this reason as the blocker, if it never clears.
+      if (!entryReserved && isRetryableEntryMarkError(error)) {
+        await store.setSignalStatus(signal.sourceSignalId, "pending", "entry_market_mark_not_corroborated");
+        return { kind: "waiting", reason: "entry_market_mark_not_corroborated" };
+      }
       await store.setSignalStatus(signal.sourceSignalId, "error", reason);
       await store.recordEvent?.(signal.sourceSignalId, "vst_worker_error", {
         reason, ...(entryReserved ? {} : { stage: "before_entry" }),

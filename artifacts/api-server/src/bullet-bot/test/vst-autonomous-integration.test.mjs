@@ -5971,3 +5971,32 @@ test("a +5% touch on a position its exchange take already closed is never marked
   assert.ok(!store.data.events.some((e) => e.kind === "vst_signal_status_changed" &&
     e.detail?.reason === "triggered_stop_reconciliation_unknown"));
 });
+
+test("a momentary VST mark/quote mismatch before entry keeps the signal pending, not dead (CP 2026-10-27)", async () => {
+  const store = durableStore(null);
+  const exchange = freshEntryExchange({ symbol: "BTCUSDT", initialLeverage: 10 });
+  let failures = 1;
+  const { worker } = makeFreshSignalWorker(store, exchange, ["BTCUSDT"], (broker) => {
+    const read = broker.readPlanningInputs.bind(broker);
+    return { ...broker, readPlanningInputs: async (signal) => {
+      if (failures-- > 0) {
+        const error = new Error("VST mark is not corroborated by a fresh quote");
+        error.vstMarkPairRetryReason = "mark_outside_fresh_quote";
+        throw error;
+      }
+      return read(signal);
+    } };
+  });
+  const signal = confirmedImpulseSignal("BTCUSDT", "mark-mismatch-then-clears");
+  await worker.enqueue(signal);
+  const first = await worker.runOnce();
+  assert.equal(first.kind, "waiting", JSON.stringify(first));
+  assert.equal(first.reason, "entry_market_mark_not_corroborated");
+  assert.equal(store.data.pending.status, "pending");
+  assert.ok(!store.data.events.some((e) => e[1] === "vst_worker_error"));
+  for (let i = 0; i < 4 && !store.data.intents.some((r) => r.request.operation === "entry"); i++) {
+    await worker.runOnce();
+  }
+  assert.ok(store.data.intents.some((r) => r.request.operation === "entry"),
+    "the entry is attempted once the mark is corroborated");
+});
