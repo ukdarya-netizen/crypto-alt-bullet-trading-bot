@@ -8056,3 +8056,42 @@ test("entry non-execution proof requires not-found order, no history row, no fil
     clientOrderId: "entry-proof-1", request: { ...request, accountId: "other" },
   }), false);
 });
+
+test("VST keeps no margin history: a liquidation moved below the stop proves the top-up (SIREN/BIRB 2026-10-27)", async () => {
+  const position = {
+    symbol: "BTC-USDT", positionSide: "LONG", positionAmt: "0.1",
+    positionId: "position-topup", isolatedMargin: "10", avgPrice: "100",
+    liquidationPrice: "91",
+  };
+  const stop = {
+    symbol: "BTC-USDT", orderId: "stop-topup", type: "STOP_MARKET", status: "NEW",
+    side: "SELL", positionSide: "LONG", workingType: "MARK_PRICE",
+    positionId: "position-topup", mainOrderId: "entry-topup",
+    origQty: "0.1", stopPrice: "90",
+  };
+  const { api, broker } = apiFixture({ positions: [position], orders: [stop] });
+  api.getPositionMarginHistory = async () => ({ total: 0, records: [] });
+  const request = {
+    operation: "margin_top_up", environment: "vst", accountId: "test-vst-account",
+    symbol: "BTCUSDT", positionId: "position-topup", entryOrderId: "entry-topup",
+    quantity: "0.1", stopLoss: "90", stopOrderId: "stop-topup",
+    expectedIsolatedMarginBefore: "10", amount: "5.25", approvedTopUpMargin: "5.25",
+    intentCreatedAt: now - 1000, liquidationPriceBefore: "91",
+  };
+  const pending = await broker.reconcileIntent({
+    clientOrderId: "worker-margin-topup-vst", phase: "margin-top-up", request });
+  assert.equal(pending.verified, false, "liquidation unchanged: not proven");
+  position.liquidationPrice = "80";
+  const proven = await broker.reconcileIntent({
+    clientOrderId: "worker-margin-topup-vst", phase: "margin-top-up", request });
+  assert.equal(proven.verified, true);
+  assert.equal(proven.status, "filled");
+  assert.equal(proven.marginDelta, "5.25");
+  assert.equal(proven.isolatedMarginAfter, "15.25");
+  assert.equal(proven.marginHistory.source, "bingx_liquidation_price_below_stop");
+  const { liquidationPriceBefore: _omit, ...legacy } = request;
+  assert.equal((await broker.reconcileIntent({
+    clientOrderId: "worker-margin-topup-vst", phase: "margin-top-up", request: legacy })).verified,
+  false, "without the recorded pre-top-up liquidation nothing is inferred");
+  assert.equal((await broker.verifyMarginTopUpNotAdded(request)).status, "addition_found");
+});

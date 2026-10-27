@@ -1222,9 +1222,13 @@ function marginTopUpEvidenceMatches(request, evidence) {
     Date.parse(request.intentCreatedAt);
   const tolerance = Math.max(1e-8, amount * 1e-10);
   const stop = evidence.protectiveStop;
-  return evidence.marginHistory?.source === "bingx_position_margin_history" &&
-    evidence.marginHistory?.attribution ===
-      "unique_exchange_adjustment_without_operation_id" &&
+  const historyProof = evidence.marginHistory?.source === "bingx_position_margin_history" &&
+    evidence.marginHistory?.attribution === "unique_exchange_adjustment_without_operation_id";
+  // VST has no margin history; the liquidation price moved below the stop instead.
+  const liquidationProof =
+    evidence.marginHistory?.source === "bingx_liquidation_price_below_stop" &&
+    evidence.marginHistory?.attribution === "liquidation_moved_below_stop_without_history";
+  return (historyProof || liquidationProof) &&
     evidence.marginHistory?.positionId === request.positionId &&
     evidence.marginHistory?.changeReason === "ManualMarginAddition" &&
     Number.isSafeInteger(evidence.marginHistory?.time) &&
@@ -6226,6 +6230,9 @@ export function createVstWorker({
       amount: approvedAmount,
       approvedTopUpMargin: approvedAmount,
       intentCreatedAt,
+      // VST keeps no margin history; the liquidation move is the proof.
+      ...(baseline.liquidationBefore != null
+        ? { liquidationPriceBefore: String(baseline.liquidationBefore) } : {}),
     };
     return {
       phase,
@@ -6993,6 +7000,8 @@ export function createVstWorker({
         amount: String(plan.amount),
         approvedTopUpMargin: String(plan.amount),
         intentCreatedAt: Number(clock()),
+        ...(plan.liquidationBefore != null
+          ? { liquidationPriceBefore: String(plan.liquidationBefore) } : {}),
       };
       const { failureReason: _oldFailureReason, ...priorMarginTopUp } =
         record.snapshot.marginTopUp;

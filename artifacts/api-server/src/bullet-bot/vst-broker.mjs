@@ -229,6 +229,11 @@ function subtractDecimal(left, right) {
   return { amount: decimalAtScale(left, scale) - decimalAtScale(right, scale), scale };
 }
 
+function addDecimal(left, right) {
+  const scale = Math.max(left.scale, right.scale);
+  return { amount: decimalAtScale(left, scale) + decimalAtScale(right, scale), scale };
+}
+
 function withinHalfStoredUnit(value, baseline) {
   const scale = Math.max(value.scale, baseline.scale) + 1;
   const difference = decimalAtScale(value, scale) - decimalAtScale(baseline, scale);
@@ -995,6 +1000,20 @@ export function createVstBroker({
     return { ...baseline, ...plan };
   }
 
+  // VST keeps no margin history (records [] after a real addition). The
+  // margin landed iff liquidation, which was NOT below the stop when the
+  // top-up was planned, has since moved down to below the stop for the same
+  // position and quantity: nothing else moves an isolated long's liquidation.
+  function liquidationProvesTopUp(request, protection) {
+    if (request?.liquidationPriceBefore == null || protection?.verified !== true) return false;
+    const before = Number(request.liquidationPriceBefore);
+    const stop = Number(request.stopLoss);
+    const after = Number(protection.liquidationPrice);
+    const buffer = Number(protection.buffer);
+    return [before, stop, after, buffer].every(Number.isFinite) &&
+      before + buffer >= stop && protection.safe === true && after < before;
+  }
+
   async function readMarginTopUpProtection(request) {
     const baseline = await readMarginTopUpBaseline(request);
     const [positions, contract] = await Promise.all([
@@ -1159,6 +1178,12 @@ export function createVstBroker({
       row.changeReason === "ManualMarginAddition");
     if (additions.length > 0) {
       return { verified: false, status: "addition_found", additions: additions.length };
+    }
+    // VST has no margin history. Liquidation already below the stop on a
+    // position that needed a top-up means the margin WAS added.
+    if (records.length === 0 && liquidationProvesTopUp(request, protection)) {
+      return { verified: false, status: "addition_found", additions: 0,
+        inferredFrom: "liquidation_below_stop_without_history" };
     }
     return {
       verified: true,
@@ -9216,6 +9241,43 @@ export function createVstBroker({
         );
         const additions = historyRecords.filter((row) =>
           row?.changeReason === "ManualMarginAddition");
+        // BingX VST keeps no margin adjustment history: the endpoint answers
+        // code 0 with records [] even after a real addition (SIREN, BIRB
+        // 2026-10-27), so every top-up stayed unverifiable forever. The
+        // position's liquidation price is the independent proof instead. A
+        // top-up is planned only while liquidation is NOT below the stop;
+        // for the same position, quantity and entry price it can only move
+        // below the stop if isolated margin was added.
+        if (historyRecords.length === 0) {
+          const protection = await readMarginTopUpProtection(request);
+          if (!liquidationProvesTopUp(request, protection) ||
+              protection.positionId !== observation.positionId) {
+            return { verified: false, status: "unknown" };
+          }
+          const at = Number(clock());
+          return {
+            verified: true,
+            status: "filled",
+            symbol: request.symbol,
+            positionId: observation.positionId,
+            positionSide: "LONG",
+            quantity: observation.quantity,
+            amount: decimalText(amount),
+            isolatedMarginBefore: decimalText(expectedBefore),
+            isolatedMarginAfter: decimalText(addDecimal(expectedBefore, amount)),
+            marginDelta: decimalText(amount),
+            marginHistory: {
+              source: "bingx_liquidation_price_below_stop",
+              changeReason: "ManualMarginAddition",
+              attribution: "liquidation_moved_below_stop_without_history",
+              positionId: observation.positionId,
+              amount: decimalText(amount),
+              time: at,
+              liquidationPrice: String(protection.liquidationPrice),
+            },
+            protectiveStop: observation.protectiveStop,
+          };
+        }
         // The history has no client operation ID. Even a same-amount row is
         // ambiguous if another addition occurred in the same time window.
         if (additions.length !== 1) {
