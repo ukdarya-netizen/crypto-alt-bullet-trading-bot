@@ -646,6 +646,16 @@ function intentBlocksSymbol(intent, symbolKey) {
   return !intentSymbolKey || intentSymbolKey === symbolKey;
 }
 
+// A close only reduces exposure. An unconfirmed isolated-margin addition on
+// the same position changes nothing the close depends on (stop, quantity),
+// and once the position is flat the added margin returns to the balance.
+// BIRB 2026-10-27: the bot's own +5% close waited 7 minutes behind an
+// unverifiable top-up. Closes no longer wait for margin top-ups.
+function intentBlocksSymbolClose(intent, symbolKey) {
+  return intent?.request?.operation !== "margin_top_up" &&
+    intentBlocksSymbol(intent, symbolKey);
+}
+
 function isFreshSignalAt(signalAt, now) {
   const signalTime = Date.parse(signalAt);
   return Number.isFinite(signalTime) &&
@@ -13887,7 +13897,7 @@ export function createVstWorker({
       const sameSymbolUnresolved = unresolved.find((intent) =>
         intent.sourceSignalId === row.sourceSignalId &&
         intent.clientOrderId !== closeIntent?.clientOrderId &&
-        intentBlocksSymbol(intent, normalizeSymbolKey(row.symbol)));
+        intentBlocksSymbolClose(intent, normalizeSymbolKey(row.symbol)));
       if (sameSymbolUnresolved) {
         const attemptKey = reconciliationIntentKey(sameSymbolUnresolved);
         if (prerequisiteAttempts.has(attemptKey)) {
@@ -14009,7 +14019,7 @@ export function createVstWorker({
     }
     const sameSymbolConflict = unresolved.find((intent) =>
       intent.clientOrderId !== existing?.clientOrderId &&
-      intentBlocksSymbol(intent, normalizeSymbolKey(row.symbol)));
+      intentBlocksSymbolClose(intent, normalizeSymbolKey(row.symbol)));
     if (sameSymbolConflict) {
       const attemptKey = reconciliationIntentKey(sameSymbolConflict);
       if (prerequisiteAttempts.has(attemptKey)) {
