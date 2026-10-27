@@ -1,0 +1,21 @@
+Production — read-only SQL export
+Executed at: 2026-10-27 (UTC)
+
+1. Query:
+SELECT id, created_at, source_signal_id, client_order_id, kind, detail FROM vst_events
+WHERE created_at > now() - interval '3 hours'
+  AND (replace(upper(detail->>'symbol'),'-','') IN ('BIRBUSDT','BTWUSDT','ATOMUSDT','IOSTUSDT')
+       OR source_signal_id IN (SELECT source_signal_id FROM vst_events
+         WHERE replace(upper(detail->>'symbol'),'-','') IN ('BIRBUSDT','BTWUSDT','ATOMUSDT','IOSTUSDT')))
+ORDER BY id;
+
+Raw result:
+id,created_at,source_signal_id,client_order_id,kind,detail
+
+
+2. No source_signal_id rows were returned by query 1. Query executed with an empty source_signal_id set:
+SELECT * FROM vst_order_intents WHERE source_signal_id = ANY($1::text[]) ORDER BY id;
+params: [[]]
+
+Raw result:
+id,source_signal_id,phase,client_order_id,request,state,exchange_order_id,outcome,created_at,updated_at
