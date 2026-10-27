@@ -5936,3 +5936,38 @@ test("a native +5% take that can never settle does not keep a flat position open
   assert.equal(store.data.positions[0].status, "closed");
   assert.ok(closedAt[0] >= 10 * 60_000, `not before the take had its grace period: ${closedAt[0]}`);
 });
+
+test("a +5% touch on a position its exchange take already closed is never marked unknown (US 2026-10-26)", async () => {
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  const nativeOwned = { ...broker,
+    readLastPrices: async (symbols) => symbols.map((symbol) => ({
+      verified: true, symbol, price: 105, priceDecimal: "105",
+      observedAt: new Date(NOW - 1_000).toISOString(), source: "last_trade",
+    })),
+    createNativeTakeProfitManager: () => Object.freeze({
+      ensure: async () => {}, sweep: async () => {},
+      blocksPosition: () => false, ownsPosition: () => true,
+    }) };
+  let now = NOW;
+  const worker = createVstWorker({ store, broker: nativeOwned, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await worker.tick().catch(() => {});
+  // The exchange take filled: flat account, no orders, and the +5% touch is latched.
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  const statuses = new Set();
+  for (let offset = 0; offset <= 16 * 60_000; offset += 30_000) {
+    now = NOW + offset;
+    await worker.tick().catch(() => {});
+    statuses.add(store.data.positions[0].status);
+    if (store.data.positions[0].status === "closed") break;
+  }
+  assert.ok(!statuses.has("unknown"), [...statuses].join(","));
+  assert.ok(!store.data.events.some((e) => e.kind === "vst_full_take_close_stuck"),
+    "no 'close it by hand' alert for a position the exchange already closed");
+  assert.ok(!store.data.events.some((e) => e.kind === "vst_signal_status_changed" &&
+    e.detail?.reason === "triggered_stop_reconciliation_unknown"));
+});

@@ -1614,6 +1614,9 @@ export function createVstWorker({
       if (!fullTakeAttempted.has(record.sourceSignalId) &&
           now - fullTakeProcessStartedAt < FULL_TAKE_STARTUP_GRACE_MS) continue;
       const progress = fullTakeProgressFor(record.sourceSignalId);
+      // Already flat on the exchange (its own take filled); only the ledger
+      // settlement is pending. "Close it by hand" would be a false alarm.
+      if (progress.lastReason === "native_take_fill_settlement_pending") continue;
       const stage = age >= FULL_TAKE_STUCK_MS && !progress.stuckSent ? "stuck"
         : age >= FULL_TAKE_DELAYED_MS && !progress.delayedSent && !progress.stuckSent ? "delayed"
           : null;
@@ -13688,6 +13691,16 @@ export function createVstWorker({
     const symbolRows = accountState.positions.filter((item) =>
       normalizeSymbolKey(item?.symbol) === normalizeSymbolKey(state.symbol) &&
       Number(item?.positionAmt ?? item?.quantity) !== 0);
+    // The exchange +5% take order closed the position (US 2026-10-26): the
+    // flat account is its fill, settled by the native take manager from the
+    // exact order. Treating it as a triggered stop marked the position
+    // "unknown", the take settlement then lost its record and the trade
+    // ended as an unconfirmed external close with a "close by hand" alert.
+    if (symbolRows.length === 0 &&
+        (nativeTakeProfit?.ownsPosition(record.sourceSignalId) ||
+          nativeTakeProfit?.blocksPosition(record.sourceSignalId))) {
+      return { kind: "waiting", reason: "native_take_fill_settlement_pending" };
+    }
     const expectedQuantity = Number(state.remainingQty ?? state.quantity);
     const actualQuantity = symbolRows.length === 1
       ? Number(symbolRows[0].positionAmt ?? symbolRows[0].quantity) : 0;
@@ -14061,6 +14074,9 @@ export function createVstWorker({
       }
       if (stopResidual?.kind === "unknown") {
         return stopResidual;
+      }
+      if (stopResidual?.kind === "waiting") {
+        return { ...stopResidual, sourceSignalId: row.sourceSignalId, symbol: row.symbol };
       }
     }
     let preflight;

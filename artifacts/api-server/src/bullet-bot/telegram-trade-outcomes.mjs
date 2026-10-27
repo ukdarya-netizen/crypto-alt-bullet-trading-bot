@@ -86,6 +86,7 @@ const OUTCOME_TEXT = {
 };
 
 const TAKE_CLOSE_REASONS = [
+  [/^native_take_/, "тейк на бирже исполнен, бот подтверждает закрытие"],
   [/^full_take_close_not_attempted$/, "цикл бота ещё не дошёл до закрытия (бот занят или перезапускается)"],
   [/same_symbol_intent_unresolved|waiting_for_entry_reconciliation|prerequisite/, "по монете не завершена предыдущая операция, бот сверяет её с биржей"],
   [/close_reconciliation_pending|acted|full_take_close_attempted/, "ордер на закрытие отправлен, ждём подтверждения биржи"],
