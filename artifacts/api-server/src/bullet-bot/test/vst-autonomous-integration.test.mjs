@@ -120,12 +120,17 @@ function durableStore(initialPosition) {
       for (const row of data.positions) row.status = status;
     },
     async recordEvent(...event) { data.events.push(event); },
-    async closeVerifiedFlatPosition(sourceSignalId, { observation }) {
+    async latestNativeTakeIntent(sourceSignalId) {
+      return data.intents.filter((intent) => intent.sourceSignalId === sourceSignalId &&
+        String(intent.phase).startsWith("native-full-take-")).at(-1) ?? null;
+    },
+    async closeVerifiedFlatPosition(sourceSignalId, { observation, takeAttribution = null }) {
       const row = data.positions.find((item) => item.sourceSignalId === sourceSignalId);
       if (!row || !["open", "closing", "unknown"].includes(row.status)) return null;
       const previousStatus = row.status;
       row.status = "closed";
-      row.snapshot = { ...row.snapshot, status: "closed", closeReason: "external_close_verified_flat",
+      row.snapshot = { ...row.snapshot, status: "closed",
+        closeReason: takeAttribution ? "native_take_profit_inferred" : "external_close_verified_flat",
         remainingQty: 0, coreOpen: false, runnerOpen: false, externalClose: { ...observation, previousStatus } };
       data.status = "closed";
       for (const intent of data.intents) {
@@ -133,7 +138,8 @@ function durableStore(initialPosition) {
           intent.state = "failed";
         }
       }
-      data.events.push([sourceSignalId, "vst_external_close_verified", { ...observation, previousStatus }]);
+      data.events.push([sourceSignalId, "vst_external_close_verified",
+        { ...observation, previousStatus, ...(takeAttribution ? { takeAttribution } : {}) }]);
       return row;
     },
     async listUnresolvedIntents() {
@@ -5999,4 +6005,46 @@ test("a momentary VST mark/quote mismatch before entry keeps the signal pending,
   }
   assert.ok(store.data.intents.some((r) => r.request.operation === "entry"),
     "the entry is attempted once the mark is corroborated");
+});
+
+
+test("a flat position whose resting exchange take was touched closes as a take, not as an unconfirmed close (ANIME 2026-10-27)", async () => {
+  const { vstTradeOutcome } = await import("../telegram-trade-outcomes.mjs");
+  const { store, exchange } = await completeSplitFixture({ sourceExitClose: true });
+  exchange.setMarkPrice("101");
+  const { broker } = makeWorker(store, exchange, [SYMBOL], { environment: "vst" }, () => NOW, true);
+  const sourceSignalId = store.data.positions[0].sourceSignalId;
+  store.data.intents.push({
+    sourceSignalId, phase: "native-full-take-0", clientOrderId: "nt_anime", state: "submitted",
+    exchangeOrderId: "999001",
+    request: { operation: "native_full_take", binding: { symbol: SYMBOL, takePrice: "104.5",
+      entryPrice: String(store.data.positions[0].snapshot.entryPrice), createdAt: NOW - 60_000 } },
+  });
+  const nativeOwned = { ...broker,
+    readLastPrices: async (symbols) => symbols.map((symbol) => ({
+      verified: true, symbol, price: 105, priceDecimal: "105",
+      observedAt: new Date(NOW - 1_000).toISOString(), source: "last_trade",
+    })),
+    createNativeTakeProfitManager: () => Object.freeze({
+      ensure: async () => {}, sweep: async () => {},
+      blocksPosition: () => false, ownsPosition: () => true,
+    }) };
+  let now = NOW;
+  const worker = createVstWorker({ store, broker: nativeOwned, clock: () => now,
+    sourceExitsEnabled: true, strategyAuthority: "source", exitStrategy: "full_take_5pct" });
+  await worker.tick().catch(() => {});
+  assert.equal(await worker.observeFullTakePrices(), 1);
+  exchange.setPositionQuantity(0);
+  exchange.orders.splice(0, exchange.orders.length);
+  for (let offset = 0; offset <= 20 * 60_000 && store.data.positions[0].status !== "closed"; offset += 30_000) {
+    now = NOW + offset;
+    await worker.tick().catch(() => {});
+  }
+  assert.equal(store.data.positions[0].status, "closed");
+  assert.equal(store.data.positions[0].snapshot.closeReason, "native_take_profit_inferred");
+  const closeEvent = store.data.events.find((e) => e[1] === "vst_external_close_verified");
+  assert.equal(closeEvent[2].takeAttribution.cause, "native_take_profit");
+  assert.equal(vstTradeOutcome({ kind: closeEvent[1], detail: closeEvent[2] }), "take");
+  assert.ok(!store.data.events.some((e) => e[1] === "vst_signal_status_changed" &&
+    e[2]?.reason === "triggered_stop_reconciliation_unknown"), "never misread as a stop");
 });

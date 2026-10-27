@@ -39,7 +39,9 @@ export function vstTradeOutcome(event) {
   }
   if (event.kind === "vst_worker_error" && detail.stage === "before_entry") return "not_opened";
   if (event.kind === "vst_position_management_quarantined") return "unmanaged";
-  if (event.kind === "vst_external_close_verified") return "closed_external";
+  if (event.kind === "vst_external_close_verified") {
+    return detail.takeAttribution?.cause === "native_take_profit" ? "take" : "closed_external";
+  }
   if (event.kind === "vst_full_take_close_delayed") return "take_delayed";
   if (event.kind === "vst_full_take_close_stuck") return "take_stuck";
   if (event.kind === "vst_triggered_stop_verified") return "stop";

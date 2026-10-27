@@ -2658,7 +2658,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
     // is invented (closeFill stays absent, the journal shows "—"). Unresolved
     // intents of this signal are retired with the same proof, since nothing
     // they could still do can change a flat symbol with no orders.
-    async closeVerifiedFlatPosition(sourceSignalId, { observation }) {
+    async closeVerifiedFlatPosition(sourceSignalId, { observation, takeAttribution = null }) {
       const signalId = requireString(sourceSignalId, "sourceSignalId");
       requirePlainObject(observation, "observation");
       return transaction(pool, async (client) => {
@@ -2679,7 +2679,8 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           ...snapshot,
           status: "closed",
           closedAt,
-          closeReason: "external_close_verified_flat",
+          closeReason: takeAttribution ? "native_take_profit_inferred" : "external_close_verified_flat",
+          ...(takeAttribution ? { exitPrice: Number(takeAttribution.takePrice), takeAttribution } : {}),
           remainingQty: 0,
           ...(typeof snapshot.coreQty === "number" ? { coreQty: 0 } : {}),
           ...(typeof snapshot.runnerQty === "number" ? { runnerQty: 0 } : {}),
@@ -2694,9 +2695,9 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           [signalId, serialize(closed, "VST position")],
         );
         await client.query(
-          `UPDATE vst_signals SET status = 'closed', reason = 'external_close_verified_flat', updated_at = now()
+          `UPDATE vst_signals SET status = 'closed', reason = $2, updated_at = now()
            WHERE source_signal_id = $1`,
-          [signalId],
+          [signalId, takeAttribution ? "native_take_profit_inferred" : "external_close_verified_flat"],
         );
         const retired = await client.query(
           `UPDATE vst_order_intents
@@ -2714,6 +2715,7 @@ export function createVstStore(pool, { leaderLockId = LOCK_ID } = {}) {
           [signalId, serialize({
             ...observation, previousStatus: record.status,
             retiredIntents: retired.rows.map((row) => row.client_order_id),
+            ...(takeAttribution ? { takeAttribution } : {}),
           }, "VST event detail")],
         );
         return positionFromRow(positionResult.rows[0]);

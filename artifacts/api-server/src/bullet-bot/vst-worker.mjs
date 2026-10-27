@@ -1723,6 +1723,30 @@ export function createVstWorker({
   const NATIVE_TAKE_FLAT_GRACE_MS = 10 * 60_000;
   const nativeTakeFlatSince = new Map(); // sourceSignalId -> first flat observation while a native take owns it
 
+  async function inferNativeTakeClose(record) {
+    const evidence = latchedFullTakeEvidence(record);
+    if (!evidence || typeof store.latestNativeTakeIntent !== "function") return null;
+    let intent;
+    try { intent = await store.latestNativeTakeIntent(record.sourceSignalId); } catch { return null; }
+    const binding = intent?.request?.binding;
+    const takePrice = Number(binding?.takePrice);
+    const observedPrice = Number(evidence.observedPrice);
+    const touchedAt = Date.parse(evidence.observedAt);
+    const placedAt = Number(binding?.createdAt);
+    if (!binding || !(takePrice > 0) || !(observedPrice >= takePrice) ||
+        !Number.isFinite(touchedAt) || !(placedAt > 0) || touchedAt < placedAt ||
+        !["submitted", "unknown"].includes(intent.state) || !intent.exchangeOrderId) return null;
+    return {
+      cause: "native_take_profit",
+      takeOrderId: String(intent.exchangeOrderId),
+      takePrice: String(binding.takePrice),
+      entryPrice: String(binding.entryPrice ?? record.snapshot?.entryPrice ?? ""),
+      touchedPrice: String(evidence.observedPrice),
+      touchedAt: evidence.observedAt,
+      proof: "take_touched_while_resting_fill_not_retrievable",
+    };
+  }
+
   async function reconcileExternallyFlatPositions(openPositions, accountState, unresolved) {
     if (typeof store.closeVerifiedFlatPosition !== "function") return null;
     const live = new Set(openPositions.map((record) => record?.sourceSignalId));
@@ -1770,7 +1794,15 @@ export function createVstWorker({
       // exact protective order and its child fills, including for newer
       // ordinary patterns (Neon, Stealth, etc.). This path is read-only on
       // the exchange and commits only independently verified stop evidence.
-      if (state.patternId !== "impulse_buy" && state.coreOpen === true &&
+      // ANIME 2026-10-27: price touched +5% and the resting exchange take
+      // (at +5%) filled, but its exact fill could not be proven, so the flat
+      // position ended as "closed, cause unconfirmed" — after first being
+      // misread as a triggered stop. A touch at/above the take price while
+      // that take order rests is the cause: the stop is far below and the
+      // position was already flat. Attribute the close to the take.
+      const takeAttribution = await inferNativeTakeClose(record);
+      if (!takeAttribution &&
+          state.patternId !== "impulse_buy" && state.coreOpen === true &&
           typeof broker.observeTriggeredStop === "function" &&
           typeof state.coreStopOrderId === "string" &&
           Number(state.remainingQty) > 0) {
@@ -1800,6 +1832,7 @@ export function createVstWorker({
           firstObservedAt: new Date(seen.first).toISOString(),
           lastObservedAt: new Date(seen.last).toISOString(),
         },
+        ...(takeAttribution ? { takeAttribution } : {}),
       });
       externalFlatObservations.delete(record.sourceSignalId);
       if (!closed) continue;
