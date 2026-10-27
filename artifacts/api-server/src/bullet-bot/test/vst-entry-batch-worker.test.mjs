@@ -808,3 +808,20 @@ test("in-flight rows are never treated as untouched expired signals or replayed"
   assert.equal(harness.metrics.entrySubmissions.length, 0);
   assert.equal(harness.store.data.intents.length, 1);
 });
+test("an exit queued for another symbol that this tick could not finish does not block entries (BIRB 2026-10-27)", async () => {
+  const harness = createHarness(makeSignals(3), { sourceExitsEnabled: true });
+  harness.store.data.sourceExitRequests.push({
+    requestId: "stuck-exit-other-symbol",
+    sourceSignalId: "unrelated-position",
+    symbol: "OTHERUSDT",
+    state: "pending",
+    evidence: { reason: "withdrawn", asOf: new Date(NOW).toISOString() },
+  });
+  const worker = harness.makeWorker({ sourceExitsEnabled: true });
+  const results = [];
+  for (let i = 0; i < 4 && harness.metrics.entrySubmissions.length === 0; i++) {
+    results.push(await worker.runOnce());
+  }
+  assert.ok(harness.metrics.entrySubmissions.length > 0,
+    JSON.stringify(results.map((r) => r?.reason ?? r?.kind)));
+});

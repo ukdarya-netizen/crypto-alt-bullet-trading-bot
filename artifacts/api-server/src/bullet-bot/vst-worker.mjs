@@ -7222,7 +7222,8 @@ export function createVstWorker({
         // Capabilities/planning/account reads can take many paced requests.
         // Recheck after those reads, not just before starting the phase.
         try {
-          if ((await readPendingSourceExitRequests()).length) {
+          if (sourceExitsBlockingEntry(await readPendingSourceExitRequests(),
+            signal.symbol).length) {
             return { kind: "waiting",
               reason: "source_exit_priority_before_entry_batch_phase" };
           }
@@ -14415,6 +14416,21 @@ export function createVstWorker({
     return rows;
   }
 
+  // Source exits go before entries. But a queued exit that this tick already
+  // tried and could not finish is a SYMBOL-scoped barrier (see
+  // processPendingSourceExits): it blocks an entry on that symbol only. It
+  // used to block every entry until it resolved: BIRB 2026-10-27 kept an
+  // unfinishable exit queued for hours and BTW, ATOM and IOST expired
+  // ("source_exit_priority_before_entry_batch_phase"). New, untried exits
+  // still pre-empt every entry.
+  function sourceExitsBlockingEntry(rows, entrySymbol) {
+    const entryKey = normalizeSymbolKey(entrySymbol);
+    return rows.filter((row) => {
+      const key = normalizeSymbolKey(row?.symbol);
+      return !key || key === entryKey || !sourceExitBlockedSymbols.has(key);
+    });
+  }
+
   let lastBlockingReason = null;
   async function runOnce() {
     const tickId = `vst-tick-${randomUUID()}`;
@@ -15429,7 +15445,8 @@ export function createVstWorker({
                     reason: "source_exit_queue_unavailable",
                     batchStop: true };
                 }
-                if (sourceRequests.length) {
+                if (sourceExitsBlockingEntry(sourceRequests,
+                  candidate.body?.symbol).length) {
                   return { kind: "waiting",
                     reason: "source_exit_priority_before_entry_batch_phase",
                     batchStop: true };
