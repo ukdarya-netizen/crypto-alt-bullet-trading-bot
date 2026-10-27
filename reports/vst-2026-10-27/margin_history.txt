@@ -1,0 +1,78 @@
+Production DB and BingX VST read-only responses
+
+Intent lookup (production):
+SELECT client_order_id, request->>'symbol' AS symbol, request->>'positionId' AS position_id, request->>'intentCreatedAt' AS intent_created_at FROM vst_order_intents WHERE client_order_id = ANY($1::text[]) ORDER BY client_order_id;
+params: ["vst-ab2a0c6a905c24bbd94ad061e56078","vst-36a890698a138545820f36b835dee4"]
+Raw result:
+client_order_id,symbol,position_id,intent_created_at
+vst-36a890698a138545820f36b835dee4,BIRBUSDT,2114874917481611265,1793060490323
+vst-ab2a0c6a905c24bbd94ad061e56078,SIRENUSDT,2114816408564006913,1793046506405
+
+
+VST request safeguards: environment=vst (https://open-api-vst.bingx.com in client config); the transport blocked any HTTP method other than GET; writePermission returned false. Exactly 3 HTTP requests were sent; all were GET with HTTP 200. Request paths only are recorded; signed URLs, headers, API keys and signatures are omitted.
+
+The client validates perpetual symbols in compact form. Calls below therefore pass SIRENUSDT and BIRBUSDT (hyphenated strings are rejected locally before any request).
+
+Call parameters:
+[
+  {
+    "name": "siren_margin_history",
+    "method": "getPositionMarginHistory",
+    "symbol": "SIRENUSDT",
+    "positionId": "2114816408564006913",
+    "startTime": 1793046446405,
+    "endTime": 1793082253534,
+    "pageIndex": 1,
+    "pageSize": 100
+  },
+  {
+    "name": "siren_positions",
+    "method": "getPositions",
+    "symbol": "SIRENUSDT"
+  },
+  {
+    "name": "birb_margin_history",
+    "method": "getPositionMarginHistory",
+    "symbol": "BIRBUSDT",
+    "positionId": "2114874917481611265",
+    "startTime": 1793060430323,
+    "endTime": 1793082253534,
+    "pageIndex": 1,
+    "pageSize": 100
+  }
+]
+
+Raw BingX HTTP JSON bodies (exact response body text):
+[
+  {
+    "method": "GET",
+    "path": "/openApi/swap/v1/positionMargin/history",
+    "status": 200,
+    "rawBody": "{\"code\":0,\"msg\":\"\",\"timestamp\":1793082253794,\"data\":{\"records\":[],\"total\":0}}"
+  },
+  {
+    "method": "GET",
+    "path": "/openApi/swap/v2/user/positions",
+    "status": 200,
+    "rawBody": "{\"code\":0,\"msg\":\"\",\"data\":[]}"
+  },
+  {
+    "method": "GET",
+    "path": "/openApi/swap/v1/positionMargin/history",
+    "status": 200,
+    "rawBody": "{\"code\":0,\"msg\":\"\",\"timestamp\":1793082255874,\"data\":{\"records\":[],\"total\":0}}"
+  }
+]
+
+Results returned by the existing client methods:
+{
+  "siren_margin_history": {
+    "total": 0,
+    "records": []
+  },
+  "siren_positions": [],
+  "birb_margin_history": {
+    "total": 0,
+    "records": []
+  }
+}
