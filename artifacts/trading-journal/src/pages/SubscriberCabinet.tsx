@@ -141,7 +141,7 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
     onError: (e) => setError(e instanceof ApiFailure ? e.message : "Не удалось выбрать"),
   });
   return (
-    <Step n={2} title="Стратегия" done={Boolean(sub.strategyText)}>
+    <Step n={3} title="Стратегия" done={Boolean(sub.strategyText)}>
       {sub.strategyText && <p className="mb-3 text-sm">Сейчас: <span className="font-semibold">{sub.strategyText}</span></p>}
       <StrategyPicker
         value={{ strategy: sub.strategy, patternExit: sub.patternExit, patterns: sub.patterns }}
@@ -184,7 +184,7 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
       : `В сделку ${numeric.toLocaleString("ru-RU")} ${unit} своих, позиция ${(numeric * leverage).toLocaleString("ru-RU")} ${unit}.`
     : mode === "percent" ? `Процент от ${limits.min} до ${limits.max}.` : `Сумма от ${limits.min} ${unit}.`;
   return (
-    <Step n={3} title="Размер сделки" done={!changed}>
+    <Step n={4} title="Размер сделки" done={!changed}>
       <div className="space-y-5">
         <div className="space-y-2">
           <p className="text-xs font-bold uppercase text-muted-foreground">Сколько своих денег в одну сделку</p>
@@ -248,7 +248,7 @@ function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
   });
   const real = sub.tradingAccount === "real";
   return (
-    <Step n={4} title="Счёт" done>
+    <Step n={2} title="Счёт" done>
       <div className="grid grid-cols-2 border border-border">
         <button type="button" disabled={sub.tradingEnabled || change.isPending || !real}
           onClick={() => change.mutate("vst")} aria-pressed={!real}
@@ -306,7 +306,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
           <Play className="h-4 w-4" /> Старт
         </button>
       )}
-      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала шаги 1 и 2.</p>}
+      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала ключ (шаг 1) и стратегия (шаг 3).</p>}
       <p className="mt-4 text-xs text-muted-foreground">
         {sub.tradingAccount === "real"
           ? <b className="text-destructive">Торговля идёт на РЕАЛЬНОМ счёте BingX. </b>
@@ -393,9 +393,9 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
         </div>
       )}
       <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
-      <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
-      <SizeStep key={JSON.stringify(sub.positionSettings)} sub={sub} choices={positionChoices} onChanged={refresh} />
       <AccountStep sub={sub} onChanged={refresh} />
+      <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
+      <SizeStep key={`${sub.tradingAccount}:${JSON.stringify(sub.positionSettings)}`} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
       <Results />
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>
