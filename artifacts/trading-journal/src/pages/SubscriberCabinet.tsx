@@ -92,7 +92,7 @@ function KeyStep({ sub, keysConfigured, onChanged }: { sub: Subscription; keysCo
     onSuccess: () => { setEditing(true); setMessage("Ключ удалён, торговля остановлена"); onChanged(); },
   });
   return (
-    <Step n={1} title="Ключ API BingX" done={Boolean(sub.apiKeyVerifiedAt) && !editing}>
+    <Step n={2} title="Ключ API BingX" done={Boolean(sub.apiKeyVerifiedAt) && !editing}>
       {!keysConfigured && <p className="mb-3 text-sm text-amber-300">Владелец ещё не включил хранилище ключей. Попробуйте позже.</p>}
       {sub.apiKeyVerifiedAt && !editing ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -248,7 +248,7 @@ function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
   });
   const real = sub.tradingAccount === "real";
   return (
-    <Step n={2} title="Счёт" done>
+    <Step n={1} title="Счёт" done>
       <div className="grid grid-cols-2 border border-border">
         <button type="button" disabled={sub.tradingEnabled || change.isPending || !real}
           onClick={() => change.mutate("vst")} aria-pressed={!real}
@@ -306,7 +306,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
           <Play className="h-4 w-4" /> Старт
         </button>
       )}
-      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала ключ (шаг 1) и стратегия (шаг 3).</p>}
+      {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала ключ (шаг 2) и стратегия (шаг 3).</p>}
       <p className="mt-4 text-xs text-muted-foreground">
         {sub.tradingAccount === "real"
           ? <b className="text-destructive">Торговля идёт на РЕАЛЬНОМ счёте BingX. </b>
@@ -392,8 +392,8 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
           <h1 className="text-xl font-bold">Мой торговый бот</h1>
         </div>
       )}
-      <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
       <AccountStep sub={sub} onChanged={refresh} />
+      <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
       <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={`${sub.tradingAccount}:${JSON.stringify(sub.positionSettings)}`} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />

@@ -369,8 +369,9 @@ router.post("/me/account", async (req, res) => {
   if (account === "real") {
     if (!row.real_allowed) return refuse(res, 403, "real_not_allowed", "Владелец не разрешил реальный счёт");
     if (req.body?.confirm !== true) return refuse(res, 422, "confirm", "Подтвердите торговлю на реальные деньги");
-    if (!row.api_key_encrypted || !row.api_secret_encrypted) return refuse(res, 422, "no_key", "Сначала добавьте ключ BingX");
-    try {
+    // Without a key yet the account is just chosen; the key is checked on the
+    // real account when it is saved, and "Старт" requires that check.
+    if (row.api_key_encrypted && row.api_secret_encrypted) try {
       await realAccountBalance(decryptSecret(row.api_key_encrypted as string), decryptSecret(row.api_secret_encrypted as string));
       realVerified = true;
     } catch (error) {
