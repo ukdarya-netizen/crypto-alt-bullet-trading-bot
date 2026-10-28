@@ -37,7 +37,7 @@ function fixture() {
   const native = createNativeTakeApi({
     assertVst: () => {}, readOrders: raw.getOpenOrders, readPositions: raw.getPositions,
     queryOrder: raw.queryOrder, contract: async () => ({ pricePrecision: 2 }),
-    getPositionMode: async () => state.mode, getMarginType: async () => state.margin,
+    getPositionMode: async () => state.mode, getMarginType: async () => { state.marginReads = (state.marginReads ?? 0) + 1; return state.margin; },
     getLeverage: async () => ({ longLeverage: state.leverage }),
     exactOrderId: (value) => value.order.orderId, clock: () => now,
     write: async (method, params, options) => {
@@ -342,4 +342,25 @@ test("NOT 2026-10-28: fills without triggerOrderId are linked through the querie
     assert.equal((await proveNativeTakeFill(api, binding, stops, now)).verified, false);
     Object.assign(executed, saved.executed); fills[0] = saved.fills[0];
   }
+});
+
+test("a take that cannot be placed backs off (2,4,8.. min) and names the failing check", async () => {
+  const f = fixture();
+  f.state.margin = "CROSSED";
+  let t = now;
+  const manager = createNativeTakeManager({ api: f.api, store: f.store,
+    proveFill: async () => ({ verified: false }), clock: () => t });
+  await manager.ensure(f.record);
+  const pending = f.events.filter((e) => e.kind === "vst_native_take_pending");
+  assert.match(pending.at(-1).detail.reason, /native_take_entry_or_settings_changed:margin_type/);
+  t += 60_000;
+  const before = f.state.marginReads ?? 0;
+  await manager.ensure(f.record);
+  await manager.sweep();
+  assert.equal(f.state.posts, 0);
+  assert.equal((f.state.marginReads ?? 0) - before, 0, "no margin-type read inside the backoff window");
+  t += 61_000; // past the 2-minute backoff
+  f.state.margin = "ISOLATED";
+  await manager.sweep();
+  assert.equal(f.state.posts, 1, "retried after the backoff and placed");
 });

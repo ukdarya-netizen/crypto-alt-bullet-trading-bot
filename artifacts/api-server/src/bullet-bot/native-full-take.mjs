@@ -147,13 +147,18 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
         queryOrder(binding.symbol, { orderId: binding.entryOrderId }),
       ]);
       const active = positionRows(positions, binding);
-      if (mode !== "HEDGE" || margin !== "ISOLATED" || Number(leverage.longLeverage) !== 10 ||
-          active.length !== 1 || !equal(active[0].positionAmt, binding.quantity) ||
-          !entry || id(entry) !== binding.entryOrderId || entry.status !== "FILLED" ||
-          entry.symbol !== nativeSymbol(binding.symbol) || entry.side !== "BUY" ||
-          entry.positionSide !== "LONG" || !equal(entry.avgPrice, binding.entryPrice) ||
-          !positive(entry.executedQty))
-        throw new Error("native_take_entry_or_settings_changed");
+      // Name the first failing check (the bare "settings changed" hid which one).
+      const failed = mode !== "HEDGE" ? "position_mode"
+        : margin !== "ISOLATED" ? "margin_type"
+          : Number(leverage.longLeverage) !== 10 ? "leverage"
+            : active.length !== 1 ? "position_absent"
+              : !equal(active[0].positionAmt, binding.quantity) ? "position_quantity"
+                : !entry || id(entry) !== binding.entryOrderId ? "entry_order_identity"
+                  : entry.status !== "FILLED" || !positive(entry.executedQty) ? "entry_order_status"
+                    : entry.symbol !== nativeSymbol(binding.symbol) || entry.side !== "BUY" ||
+                        entry.positionSide !== "LONG" ? "entry_order_side"
+                      : !equal(entry.avgPrice, binding.entryPrice) ? "entry_avg_price" : null;
+      if (failed) throw new Error(`native_take_entry_or_settings_changed:${failed}`);
       checkStopRows(orders, binding, stops);
     };
     await verify();
@@ -398,6 +403,20 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
   const blocked = new Set();
   const owned = new Set();
   const reported = new Map();
+  // A take that cannot be placed must not be retried every sweep: each attempt
+  // reads position mode, margin type, leverage, positions, orders and the entry.
+  // 2026-10-26/27 the retries kept GET /trade/marginType in BingX's 100410
+  // "disabled period", and new entries (which read the same endpoint) expired.
+  // Backoff 2, 4, 8, 16, 30 min per position; reset after a placed take.
+  const createRetry = new Map();
+  const CREATE_BACKOFF_MS = [120_000, 240_000, 480_000, 960_000, 1_800_000];
+  const createDeferred = (sourceSignalId) =>
+    Number(clock()) < (createRetry.get(sourceSignalId)?.at ?? 0);
+  function noteCreateFailure(sourceSignalId) {
+    const failures = (createRetry.get(sourceSignalId)?.failures ?? 0) + 1;
+    createRetry.set(sourceSignalId, { failures,
+      at: Number(clock()) + CREATE_BACKOFF_MS[Math.min(failures, CREATE_BACKOFF_MS.length) - 1] });
+  }
   async function report(sourceSignalId, error) {
     const reason = error instanceof Error ? error.message : "native_take_unverified";
     const key = `${sourceSignalId}:${reason}`;
@@ -412,6 +431,7 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     if (state.executionStrategy && state.executionStrategy.version !== 1)
       throw new TypeError("Unsupported position strategy version");
     if ((state.executionStrategy?.exitStrategy ?? legacyExitStrategy) !== "full_take_5pct") return;
+    if (createDeferred(record.sourceSignalId)) return;
     if (record.status !== "open" || state.environment !== "vst" || Number(state.leverage) !== 10 ||
         !positive(state.remainingQty) || !state.exchangePositionId || !state.entryOrderId ||
         !state.accountId || String(state.marginMode).toUpperCase() !== "ISOLATED") return;
@@ -451,7 +471,11 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
         orderId: submitted.orderId, takePrice, quantity: binding.quantity,
         triggerBasisVerified: evidence.triggerBasisVerified,
       }, clientOrderId);
-    } catch (error) { await report(record.sourceSignalId, error); }
+      createRetry.delete(record.sourceSignalId);
+    } catch (error) {
+      noteCreateFailure(record.sourceSignalId);
+      await report(record.sourceSignalId, error);
+    }
   }
   async function reconcile(intent, snapshot) {
     blocked.delete(intent.sourceSignalId);
@@ -470,12 +494,20 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     }
     if (observation.positions.length) {
       if (intent.state === "prepared" && !observation.queried && record?.status === "open") {
-        const submitted = await native.create(binding, nativeStopBindings(record.snapshot), async () => {
-          if (await store.hasPendingSourceExitRequest?.(intent.sourceSignalId))
-            throw new Error("native_take_source_exit_queued_before_transport");
-          await store.markIntent(intent.clientOrderId, "submitted", { outcome: { attempted: true } });
-          native.register(binding);
-        });
+        if (createDeferred(intent.sourceSignalId)) return;
+        let submitted;
+        try {
+          submitted = await native.create(binding, nativeStopBindings(record.snapshot), async () => {
+            if (await store.hasPendingSourceExitRequest?.(intent.sourceSignalId))
+              throw new Error("native_take_source_exit_queued_before_transport");
+            await store.markIntent(intent.clientOrderId, "submitted", { outcome: { attempted: true } });
+            native.register(binding);
+          });
+        } catch (error) {
+          noteCreateFailure(intent.sourceSignalId);
+          throw error;
+        }
+        createRetry.delete(intent.sourceSignalId);
         await store.markIntent(intent.clientOrderId, "submitted", {
           exchangeOrderId: submitted.orderId, outcome: { attempted: true, binding: submitted },
         });
