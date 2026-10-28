@@ -511,7 +511,8 @@ function PaperView({ period }: { period: PeriodId }) {
   return (
     <div className="space-y-5">
       <div className="border border-border bg-card p-4">
-        <StrategyPaperPanel endpoint="/journal/strategy-paper" />
+        <StrategyPaperPanel endpoint="/journal/strategy-paper"
+          days={PERIODS.find((p) => p.id === period)?.days ?? null} />
         <Link href="/journal/strategies" className="mt-3 inline-block text-xs text-primary hover:underline">Выбрать стратегию бота →</Link>
       </div>
       <button type="button" onClick={() => setArchive((v) => !v)}

@@ -25,7 +25,8 @@ const PATTERNS: [string, string][] = [
   ["liquidation_cascade", "Liquidation Cascade"],
 ];
 const PERIODS: { id: string; label: string }[] = [
-  { id: "7", label: "7 дней" }, { id: "30", label: "30 дней" }, { id: "all", label: "Всё время" },
+  { id: "7", label: "7 дней" }, { id: "30", label: "30 дней" }, { id: "90", label: "90 дней" },
+  { id: "all", label: "Всё время" },
 ];
 
 const pct = (v: number | null | undefined) =>
@@ -40,8 +41,14 @@ const day = (iso: string | null) =>
  * (10x, 1 % of the balance per trade, no compounding). `endpoint` is the
  * owner's or the subscriber's route; `patterns` adds the "by patterns" sum.
  */
-export function StrategyPaperPanel({ endpoint, patterns = [] }: { endpoint: string; patterns?: string[] }) {
-  const [period, setPeriod] = useState("30");
+export function StrategyPaperPanel({ endpoint, patterns = [], days }: {
+  endpoint: string; patterns?: string[];
+  /** Controlled by the page's own period switch (null = all time); omit for the built-in switch. */
+  days?: number | null;
+}) {
+  const [own, setPeriod] = useState("30");
+  const controlled = days !== undefined;
+  const period = controlled ? (days === null ? "all" : String(days)) : own;
   const params = new URLSearchParams();
   if (period !== "all") params.set("days", period);
   if (patterns.length) params.set("patterns", patterns.join(","));
@@ -61,14 +68,14 @@ export function StrategyPaperPanel({ endpoint, patterns = [] }: { endpoint: stri
             Результат в % к депозиту, если бы бот торговал все сигналы CAB этой стратегией.
           </p>
         </div>
-        <div className="flex border border-border text-sm">
+        {!controlled && <div className="flex border border-border text-sm">
           {PERIODS.map((p) => (
             <button key={p.id} type="button" onClick={() => setPeriod(p.id)}
               className={`px-3 py-1.5 ${period === p.id ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground"}`}>
               {p.label}
             </button>
           ))}
-        </div>
+        </div>}
       </div>
 
       {!d ? (
