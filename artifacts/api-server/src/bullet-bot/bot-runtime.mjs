@@ -14,6 +14,7 @@ import { postTelegramMessage } from "./telegram-client.mjs";
 import { createFullTakeWatchHealth } from "./full-take-watch-health.mjs";
 import { createSubscriberTradingManager } from "./subscriber-trading.mjs";
 import { createOwnerStrategyHolder } from "./owner-trading-strategy.mjs";
+import { recordStrategyPaperSnapshot } from "./strategy-paper.mjs";
 import { TECHNICAL_TELEGRAM_ALERTS_ENABLED } from "./telegram-trade-outcomes.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstEntryHealthMonitor } from "./vst-entry-health.mjs";
@@ -581,6 +582,10 @@ export async function startBotWorker() {
         const exits = await vstStore.queueSourceExitRequests({ asOf, positions, observedAt });
         await subscriberTrading?.queueSourceExits({ asOf, positions, allPositions, observedAt });
         const controls = await vstStore.syncSourceControls({ asOf, positions: allPositions, observedAt });
+        // Background PAPER per strategy: never blocks exits or controls.
+        void recordStrategyPaperSnapshot(pool, allPositions).catch((error) => {
+          process.stderr.write(`Strategy paper snapshot failed: ${error instanceof Error ? error.message : "error"}\n`);
+        });
         if (controls.refusals.length) process.stderr.write(
           `Bullet source control refusals: ${JSON.stringify(controls.refusals)}\n`,
         );

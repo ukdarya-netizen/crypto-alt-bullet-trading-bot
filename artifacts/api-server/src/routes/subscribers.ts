@@ -14,6 +14,8 @@ import { EXIT_CHOICES, TRADE_PATTERNS, TRADE_PATTERN_LABELS, describeTradingStra
 // @ts-expect-error JavaScript module of the bot.
 import { loadOwnerStrategy, saveOwnerStrategy } from "../bullet-bot/owner-trading-strategy.mjs";
 // @ts-expect-error JavaScript module of the bot.
+import { loadStrategyPaper } from "../bullet-bot/strategy-paper.mjs";
+// @ts-expect-error JavaScript module of the bot.
 import { ALLOCATION_LIMITS, SUBSCRIBER_LEVERAGE_CHOICES, normalizePositionProfile } from "../bullet-bot/vst-position-profile.mjs";
 
 /**
@@ -131,6 +133,13 @@ router.get("/me/subscription", async (req, res) => {
     keysConfigured: subscriberKeysConfigured(),
     positionChoices: { leverage: SUBSCRIBER_LEVERAGE_CHOICES, allocation: ALLOCATION_LIMITS },
   });
+});
+
+router.get("/me/strategy-paper", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req) }));
 });
 
 router.get("/me/performance", async (req, res) => {
@@ -321,6 +330,16 @@ router.get("/journal/trading-strategy", requireJournalSession, requireJournalOwn
     patterns: current.patterns ?? [], strategyText: describeTradingStrategy(current),
     updatedAt: current.updatedAt, choices: strategyChoices(),
   });
+});
+
+// Background PAPER per strategy (% to the deposit), same for owner and subscribers.
+function patternsQuery(req: Request): string[] {
+  const raw = typeof req.query.patterns === "string" ? req.query.patterns : "";
+  return raw.split(",").map((p) => p.trim()).filter((p) => (TRADE_PATTERNS as string[]).includes(p)).slice(0, 3);
+}
+router.get("/journal/strategy-paper", requireJournalSession, requireJournalOwner, async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req) }));
 });
 
 router.post("/journal/trading-strategy", requireJournalSession, requireJournalOwner, async (req, res) => {

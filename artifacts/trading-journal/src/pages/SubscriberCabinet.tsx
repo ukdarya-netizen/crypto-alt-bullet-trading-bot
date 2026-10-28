@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } from "lucide-react";
 import { BrandLockup } from "@/components/brand";
 import { StrategyPicker, type StrategyChoices } from "@/components/strategy-picker";
+import { StrategyPaperPanel } from "@/components/strategy-paper-panel";
 import { formatPercent, formatUsdt, inPeriod, summarize, toneClass, closeReasonGroup } from "@/lib/performance";
 import {
   api, ApiFailure, positionSettingsText, runtimeText,
@@ -146,6 +147,10 @@ function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices:
         onSave={(choice) => choose.mutate(choice)} />
       {sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Стратегию можно сменить после остановки торговли.</p>}
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
+      <div className="mt-4 border-t border-border pt-3">
+        <StrategyPaperPanel endpoint="/me/strategy-paper"
+          patterns={sub.strategy === "patterns" ? sub.patterns : []} />
+      </div>
     </Step>
   );
 }

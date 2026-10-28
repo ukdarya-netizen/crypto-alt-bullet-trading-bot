@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Target } from "lucide-react";
 import { api, ApiFailure } from "@/lib/subscriber-api";
 import { StrategyPicker, type StrategyChoices } from "@/components/strategy-picker";
+import { StrategyPaperPanel } from "@/components/strategy-paper-panel";
 
 type OwnerStrategy = {
   strategy: string; patternExit: string | null; patterns: string[]; strategyText: string;
@@ -42,6 +43,10 @@ export function OwnerStrategyCard() {
       <StrategyPicker value={{ strategy: d.strategy, patternExit: d.patternExit, patterns: d.patterns }}
         choices={d.choices} pending={save.isPending} onSave={(choice) => save.mutate(choice)} />
       {message && <p className={`text-sm ${message.bad ? "text-destructive" : "text-muted-foreground"}`}>{message.text}</p>}
+      <div className="border-t border-border pt-3">
+        <StrategyPaperPanel endpoint="/journal/strategy-paper"
+          patterns={d.strategy === "patterns" ? d.patterns : []} />
+      </div>
     </section>
   );
 }
