@@ -96,8 +96,9 @@ test("BTC uses +1% breakeven and ordinary later protection/trailing thresholds",
   assert.equal(trail.actions[0].reason, "percentage_point_trailing_stop");
 });
 
-test("BTC rejects legacy non-doc exit thresholds and supports the independent impulse runner", () => {
-  const contradictoryLegacyRules = {
+test("BTC follows CAB's own ladder, rejects only incoherent thresholds, supports the runner", () => {
+  // CAB's BTC ladder (2026-10-28): B.U. +1%, trailing from +2% at 1 pp.
+  const cabBtcRules = {
     ...exitRules({ btc: true }),
     firstTargetPct: 1,
     protectedProfitAtPct: 0,
@@ -106,10 +107,12 @@ test("BTC rejects legacy non-doc exit thresholds and supports the independent im
     trailingGapPercentagePoints: 1,
     progressMilestoneIntervalPct: 1,
   };
+  const btc = makePolicy({ patternId: "balanced_grind", symbol: "BTCUSDT", rules: cabBtcRules });
+  assert.equal(btc.symbol, "BTCUSDT");
   assert.throws(() => makePolicy({
     patternId: "balanced_grind",
     symbol: "BTCUSDT",
-    rules: contradictoryLegacyRules,
+    rules: { ...cabBtcRules, trailingGapPercentagePoints: 3 },
   }), /Unsupported BTC VST exit ladder/);
 
   const impulse = makePolicy({

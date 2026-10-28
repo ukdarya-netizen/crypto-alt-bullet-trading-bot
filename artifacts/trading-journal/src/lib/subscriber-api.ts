@@ -6,6 +6,9 @@ export type Subscription = {
   name: string | null;
   requestedAt: string;
   strategy: string | null;
+  patternExit: string | null;
+  patterns: string[];
+  strategyText: string | null;
   apiKeyLast4: string | null;
   apiKeyVerifiedAt: string | null;
   apiKeyError: string | null;
@@ -60,12 +63,6 @@ export async function api<T>(path: string, init: { method?: string; body?: unkno
   return data as T;
 }
 
-export const STRATEGY_TEXT: Record<string, string> = {
-  take5: "Вся позиция закрывается, когда цена прошла +5% от входа. Стоп — из сигнала AltBullet. Если AltBullet закрыл сделку раньше — бот тоже закрывает.",
-  classic: "Защита в безубыток на +5%, стоп на +5% при +10%, дальше трейлинг.",
-  ladder: "25% позиции на +5%, ещё 25% на +10%, остаток на +15%.",
-  patterns: "Свои правила выхода для каждого паттерна AltBullet.",
-};
 
 /** Plain-language state of a subscriber worker. */
 export function runtimeText(sub: Subscription): { text: string; tone: "ok" | "wait" | "bad" | "off" } {

@@ -3,14 +3,15 @@ import { useClerk } from "@clerk/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Clock, KeyRound, LogOut, Play, ShieldX, Square, Target } from "lucide-react";
 import { BrandLockup } from "@/components/brand";
+import { StrategyPicker, type StrategyChoices } from "@/components/strategy-picker";
 import { formatPercent, formatUsdt, inPeriod, summarize, toneClass, closeReasonGroup } from "@/lib/performance";
 import {
-  api, ApiFailure, positionSettingsText, runtimeText, STRATEGY_TEXT,
-  type PerformanceTrade, type PositionChoices, type PositionSettings, type StrategyOption, type Subscription,
+  api, ApiFailure, positionSettingsText, runtimeText,
+  type PerformanceTrade, type PositionChoices, type PositionSettings, type Subscription,
 } from "@/lib/subscriber-api";
 
 type SubscriptionResponse = {
-  subscription: Subscription; strategies: StrategyOption[]; keysConfigured: boolean; positionChoices: PositionChoices;
+  subscription: Subscription; strategyChoices: StrategyChoices; keysConfigured: boolean; positionChoices: PositionChoices;
 };
 
 function Segmented<T extends string>({ value, options, onChange, disabled }: {
@@ -128,33 +129,21 @@ function KeyStep({ sub, keysConfigured, onChanged }: { sub: Subscription; keysCo
   );
 }
 
-function StrategyStep({ sub, strategies, onChanged }: { sub: Subscription; strategies: StrategyOption[]; onChanged: () => void }) {
+function StrategyStep({ sub, choices, onChanged }: { sub: Subscription; choices: StrategyChoices; onChanged: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const choose = useMutation({
-    mutationFn: (strategy: string) => api("/me/strategy", { method: "POST", body: { strategy } }),
+    mutationFn: (choice: { strategy: string; patternExit?: string; patterns?: string[] }) =>
+      api("/me/strategy", { method: "POST", body: choice }),
     onSuccess: () => { setError(null); onChanged(); },
     onError: (e) => setError(e instanceof ApiFailure ? e.message : "Не удалось выбрать"),
   });
   return (
-    <Step n={2} title="Стратегия" done={Boolean(sub.strategy)}>
-      <div className="grid gap-3 sm:grid-cols-2">
-        {strategies.map((strategy) => {
-          const selected = sub.strategy === strategy.id;
-          return (
-            <button key={strategy.id} type="button" disabled={!strategy.available || sub.tradingEnabled || choose.isPending}
-              onClick={() => choose.mutate(strategy.id)}
-              className={`border p-4 text-left transition-colors disabled:cursor-not-allowed ${
-                selected ? "border-primary bg-primary/10" : "border-border hover:border-primary/40"} ${!strategy.available ? "opacity-50" : ""}`}>
-              <span className="flex items-center justify-between gap-2">
-                <span className="font-bold">{strategy.label}</span>
-                {selected ? <span className="text-xs font-bold text-primary">выбрана</span>
-                  : !strategy.available ? <span className="text-xs text-muted-foreground">скоро</span> : null}
-              </span>
-              <span className="mt-2 block text-xs text-muted-foreground">{STRATEGY_TEXT[strategy.id]}</span>
-            </button>
-          );
-        })}
-      </div>
+    <Step n={2} title="Стратегия" done={Boolean(sub.strategyText)}>
+      {sub.strategyText && <p className="mb-3 text-sm">Сейчас: <span className="font-semibold">{sub.strategyText}</span></p>}
+      <StrategyPicker
+        value={{ strategy: sub.strategy, patternExit: sub.patternExit, patterns: sub.patterns }}
+        choices={choices} disabled={sub.tradingEnabled} pending={choose.isPending}
+        onSave={(choice) => choose.mutate(choice)} />
       {sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Стратегию можно сменить после остановки торговли.</p>}
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
     </Step>
@@ -318,7 +307,7 @@ export default function SubscriberCabinet() {
   if (query.error || !query.data) {
     return <Shell><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />} title="Не удалось загрузить" text="Обновите страницу чуть позже." /></Shell>;
   }
-  const { subscription: sub, strategies, keysConfigured, positionChoices } = query.data;
+  const { subscription: sub, strategyChoices, keysConfigured, positionChoices } = query.data;
   if (sub.status === "pending") {
     return <Shell><Notice icon={<Clock className="h-10 w-10 text-primary" />} title="Заявка отправлена"
       text="Владелец получит её и одобрит. Эта страница обновится сама, ничего нажимать не нужно." /></Shell>;
@@ -335,7 +324,7 @@ export default function SubscriberCabinet() {
         <h1 className="text-xl font-bold">Мой торговый бот</h1>
       </div>
       <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
-      <StrategyStep sub={sub} strategies={strategies} onChanged={refresh} />
+      <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={JSON.stringify(sub.positionSettings)} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
       <Results />

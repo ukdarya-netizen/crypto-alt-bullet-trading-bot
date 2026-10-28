@@ -12,7 +12,6 @@ const STATUS: Record<Subscription["status"], { label: string; cls: string }> = {
   blocked: { label: "Заблокирован", cls: "border-destructive/40 bg-destructive/10 text-destructive" },
 };
 
-const STRATEGY: Record<string, string> = { take5: "Тейк +5%", classic: "Классическая", ladder: "25/25/50", patterns: "По паттернам" };
 
 function date(value: string | null) {
   return value ? new Date(value).toLocaleString("ru-RU", { timeZone: "Europe/Samara", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
@@ -48,7 +47,7 @@ export default function JournalSubscribers() {
         {row.status === "approved" && (
           <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
             <div><p className="text-[10px] uppercase text-muted-foreground">Ключ</p><p className={row.apiKeyVerifiedAt ? "text-success" : "text-muted-foreground"}>{row.apiKeyVerifiedAt ? `••••${row.apiKeyLast4}` : "нет"}</p></div>
-            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategy ? STRATEGY[row.strategy] ?? row.strategy : "—"}</p><p className="text-[11px] text-muted-foreground">{positionSettingsText(row.positionSettings)}</p></div>
+            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategyText ?? "—"}</p><p className="text-[11px] text-muted-foreground">{positionSettingsText(row.positionSettings)}</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Торговля</p><p className="flex items-center gap-1">{row.tradingEnabled ? <><Play className="h-3 w-3 text-success" />вкл</> : <><Pause className="h-3 w-3" />выкл</>}</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Сделки</p><p>{row.stats.closed} закр. · {row.stats.openPositions} откр.</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Прибыль</p><p className={`font-bold tabular ${toneClass(row.stats.closed ? row.stats.netUsdt : null)}`}>{row.stats.closed ? formatUsdt(row.stats.netUsdt) : "—"}</p></div>

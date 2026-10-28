@@ -16,7 +16,7 @@ import JournalHealth from "./JournalHealth";
 
 const NAV_ITEMS = [
   { href: "/journal/overview", label: "Обзор", short: "Обзор", sub: "прибыль, графики, стратегии", icon: LayoutDashboard },
-  { href: "/journal/vst", label: "VST · бот", short: "VST", sub: "BingX демо, тейк +5%", icon: Database },
+  { href: "/journal/vst", label: "VST · бот", short: "VST", sub: "BingX демо, стратегия бота", icon: Database },
   { href: "/journal", label: "PAPER", short: "PAPER", sub: "симуляция", icon: FlaskConical },
   { href: "/journal/real", label: "REAL", short: "REAL", sub: "счёт BingX", icon: Wallet },
   { href: "/journal/strategies", label: "Стратегии", short: "Стратегии", sub: "4 схемы выхода по паттернам", icon: Target },

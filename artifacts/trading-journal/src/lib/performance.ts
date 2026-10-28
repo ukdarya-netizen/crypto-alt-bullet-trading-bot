@@ -172,6 +172,10 @@ export function closeReasonGroup(reason: string | null | undefined): { id: strin
   switch (reason) {
     case "fixed_price_take_profit_5pct":
       return { id: "take5", label: "Тейк +5%" };
+    case "fixed_price_take_profit_8pct":
+      return { id: "take8", label: "Тейк +8%" };
+    case "fixed_price_take_profit_10pct":
+      return { id: "take10", label: "Тейк +10%" };
     case "protective_stop":
     case "breakeven_stop":
     case "runner_stop":

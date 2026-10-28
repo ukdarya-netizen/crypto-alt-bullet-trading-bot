@@ -1,7 +1,7 @@
 import { OWNER_POSITION_PROFILE, allocationBudget, isOwnerProfile, normalizePositionProfile } from "./vst-position-profile.mjs";
 import { createHash } from "node:crypto";
 import { directCloseEvidenceValid } from "./source-command-contract.mjs";
-import { FULL_TAKE_REASON, fullTakeEvidenceValid } from "./fixed-price-take-profit.mjs";
+import { isFullTakeReason, fullTakeEvidenceValid } from "./fixed-price-take-profit.mjs";
 import {
   archiveOrderId, archiveParentIds, validateArchiveWindow, selectArchiveChain,
   FILL_ARCHIVE_RETENTION_MS, freezeArchiveWindow, archiveParentLookupMatches,
@@ -7849,7 +7849,7 @@ export function createVstBroker({
           sourceExit.requestId !== request.sourceExitRequestId ||
           typeof request?.reason !== "string" ||
           (!["source_withdrawal", "source_closed"].includes(request.reason) &&
-            !(request.reason === FULL_TAKE_REASON && fullTakeEvidenceValid(
+            !(isFullTakeReason(request.reason) && fullTakeEvidenceValid(
               evidence, request.sourceSignalId, request.symbol, request.sourceExitRequestId)) &&
             !(request.reason === "source_command_close" && directCloseEvidenceValid(
               evidence, request.sourceSignalId, request.symbol, request.sourceExitRequestId))) ||

@@ -12,6 +12,7 @@ import { formatDate, formatNumber } from "@/lib/utils";
 import { sortPositionsNewestFirst } from "@/lib/position-order";
 import { VstEntryQueue } from "@/components/VstEntryQueue";
 import { exchangeHistoryClosedAccounting } from "./vst-closed-history";
+import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 
 type Mode = "paper" | "real" | "vst";
 type Position = {
@@ -75,6 +76,8 @@ const VST_CLOSE_REASON_LABELS: Record<string, string> = {
   runner_break_even_unavailable_at_or_below_entry: "Раннер закрыт: безубыток недостижим",
   external_close_verified_flat: "Закрыта вне бота (на бирже позиции нет, проверено)",
   fixed_price_take_profit_5pct: "Тейк +5%",
+  fixed_price_take_profit_8pct: "Тейк +8%",
+  fixed_price_take_profit_10pct: "Тейк +10%",
 };
 function vstCloseReasonLabel(reason: unknown, hasTriggeredStop: boolean): string {
   if (typeof reason === "string" && reason.trim()) {
@@ -755,6 +758,7 @@ export default function JournalPositions({ mode }: { mode: Mode }) {
       <h1 className="mt-1 text-2xl font-bold tracking-tight">{title} <span className="font-normal text-muted-foreground">/ Позиции</span></h1>
       <p className="mt-1 text-xs text-muted-foreground" data-testid={`status-${mode}-source`}>{subtitle}</p>
     </div>
+    {mode === "vst" && <OwnerStrategyCard />}
     {mode === "paper" ? <PaperBook now={now} /> : mode === "real" ? <RealBook now={now} /> : <VstBook now={now} />}
   </div>;
 }

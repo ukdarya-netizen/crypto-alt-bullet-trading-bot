@@ -13,6 +13,7 @@ import { createVstContractDriftMonitor } from "./vst-contract-drift.mjs";
 import { postTelegramMessage } from "./telegram-client.mjs";
 import { createFullTakeWatchHealth } from "./full-take-watch-health.mjs";
 import { createSubscriberTradingManager } from "./subscriber-trading.mjs";
+import { createOwnerStrategyHolder } from "./owner-trading-strategy.mjs";
 import { TECHNICAL_TELEGRAM_ALERTS_ENABLED } from "./telegram-trade-outcomes.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstEntryHealthMonitor } from "./vst-entry-health.mjs";
@@ -363,6 +364,13 @@ export async function startBotWorker() {
         }),
       })
     : null;
+  // Owner 2026-10-28: the owner's strategy (follow CAB / +5 / +8 / +10 / by
+  // patterns) is chosen in the journal and applies to every new entry.
+  const ownerStrategy = createOwnerStrategyHolder(pool);
+  if (vstActive && process.env.NODE_ENV === "production") {
+    await ownerStrategy.refresh();
+    ownerStrategy.start();
+  }
   vstWorker = vstActive && process.env.NODE_ENV === "production"
     ? createConfiguredVstWorker({
         store: vstStore,
@@ -382,6 +390,8 @@ export async function startBotWorker() {
           process.stdout.write(`Bullet VST stage timing: ${JSON.stringify(timing)}\n`);
         },
         entryGuard: id => commandInbox.isEntryBlocked(id, "vst"),
+        entryExitStrategyGetter: () => ownerStrategy.exitStrategy(),
+        allowedPatterns: () => ownerStrategy.allowedPatterns(),
         shouldYieldToUrgentWork: ({ entryPhase } = {}) =>
           workerTickScheduler?.hasPendingVstWake?.({ urgentOnly: entryPhase === true }) === true,
       })

@@ -1,8 +1,10 @@
+import { isFullTakeStrategy } from "./fixed-price-take-profit.mjs";
 // An executor's current defaults are not the strategy of an existing trade.
 // Capture before entry transport and keep the same immutable settings through
 // reconciliation, position management and restarts.
+
 export function capturePositionStrategy({ exitStrategy, strategyAuthority }) {
-  if (!["source", "full_take_5pct"].includes(exitStrategy))
+  if (exitStrategy !== "source" && !isFullTakeStrategy(exitStrategy))
     throw new TypeError("Invalid exit strategy");
   if (!["source", "policy"].includes(strategyAuthority))
     throw new TypeError("strategyAuthority must be source or policy");

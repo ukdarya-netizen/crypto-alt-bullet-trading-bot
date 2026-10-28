@@ -143,7 +143,18 @@ test("creation refuses foreign exposure, wrong leverage, missing stop and an inc
     assert.equal(f.state.posts, 0);
   }
   const f = fixture();
-  await assert.rejects(f.native.create({ ...base(), takePrice: "104" }, [], async () => {}), /five_percent/);
+  await assert.rejects(f.native.create({ ...base(), takePrice: "104" }, [], async () => {}),
+    /not_the_strategy_take/);
+  // +8% strategy: the +5% price is wrong, the +8% price is the target.
+  await assert.rejects(f.native.create({ ...base(), takePct: 8 }, [], async () => {}),
+    /not_the_strategy_take/);
+});
+
+test("native take price follows the strategy percent (+5 / +8 / +10)", () => {
+  assert.equal(nativeTakePrice("100", 2), "105.00");
+  assert.equal(nativeTakePrice("100", 2, 8), "108.00");
+  assert.equal(nativeTakePrice("100", 2, 10), "110.00");
+  assert.equal(nativeTakePrice("0.12345", 5, 8), "0.13333");
 });
 
 test("guard view never hides an unowned, changed or wrong-quantity take", () => {

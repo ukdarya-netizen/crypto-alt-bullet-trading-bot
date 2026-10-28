@@ -21,6 +21,7 @@ import { createIndependentWorkerTickScheduler } from "./worker-tick-scheduler.mj
 import { decryptSecret, forbiddenPermissions, readBingXKeyPermissions } from "./subscriber-keys.mjs";
 import { VST_ENTRY_BATCH_LIMITS, VST_SIZING_LIMITS, VST_WRITE_PATHS } from "./server.mjs";
 import { normalizePositionProfile } from "./vst-position-profile.mjs";
+import { TRADING_STRATEGIES, resolveTradingStrategy } from "./trading-strategy.mjs";
 
 /** The subscriber's chosen size, leverage and margin mode (validated). */
 export function subscriberPositionProfile(row) {
@@ -31,13 +32,16 @@ export function subscriberPositionProfile(row) {
   });
 }
 
-/** Strategies a subscriber can pick. Only executable ones can be started. */
-export const SUBSCRIBER_STRATEGIES = Object.freeze({
-  take5: { label: "Тейк +5% целиком", exitStrategy: "full_take_5pct", available: true },
-  classic: { label: "Классическая", available: false },
-  ladder: { label: "25 / 25 / 50", available: false },
-  patterns: { label: "По паттернам", available: false },
-});
+/** Strategies a subscriber can pick (owner 2026-10-28; same set as the owner's). */
+export const SUBSCRIBER_STRATEGIES = TRADING_STRATEGIES;
+
+/** The subscriber's stored choice, resolved; null when it is not valid. */
+export function subscriberTradingStrategy(row) {
+  try {
+    return resolveTradingStrategy({ strategy: row.strategy, patternExit: row.pattern_exit,
+      patterns: row.patterns });
+  } catch { return null; }
+}
 
 const LEADER_LOCK_BASE = 100_000;
 const RECONCILE_MS = 15_000;
@@ -78,6 +82,9 @@ const SUBSCRIBERS_UPGRADES = [
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS allocation_value numeric DEFAULT '1' NOT NULL",
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS leverage integer DEFAULT 10 NOT NULL",
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS margin_mode text DEFAULT 'ISOLATED' NOT NULL",
+  // Strategy "patterns": exit choice and 1-3 chosen patterns ("a,b").
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS pattern_exit text",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS patterns text",
 ];
 const ensuredPools = new WeakMap();
 
@@ -151,8 +158,8 @@ export function createSubscriberTradingManager({
 
   async function startRunner(sub) {
     const id = sub.id;
-    const strategy = SUBSCRIBER_STRATEGIES[sub.strategy];
-    if (!strategy?.available) throw new Error("strategy_not_available");
+    const strategy = subscriberTradingStrategy(sub);
+    if (!strategy) throw new Error("strategy_not_available");
     const stopBufferRate = Number(configuration.BULLET_VST_STOP_BUFFER_RATE);
     if (!Number.isFinite(stopBufferRate) || stopBufferRate <= 0 || stopBufferRate >= 1) {
       throw new Error("BULLET_VST_STOP_BUFFER_RATE is not configured");
@@ -189,7 +196,10 @@ export function createSubscriberTradingManager({
       sizingLimits: VST_SIZING_LIMITS,
       sourceExitsEnabled: true,
       strategyAuthority: "source",
-      exitStrategy: strategy.exitStrategy,
+      // Legacy +5% positions stay +5%; new entries use the chosen strategy.
+      exitStrategy: "full_take_5pct",
+      entryExitStrategyGetter: () => strategy.exitStrategy,
+      allowedPatterns: strategy.allowedPatterns,
       positionStrategySwitching: true,
       // "Стоп" or an owner cancel blocks entries; open positions are still managed.
       entryGuard: (signalId) => !runner.tradingEnabled || isEntryBlocked(signalId, "vst"),
@@ -236,13 +246,13 @@ export function createSubscriberTradingManager({
       }
       if (rows.rows.length) runner.scheduler.wakeVst?.();
     });
-    if (strategy.exitStrategy === "full_take_5pct") {
-      every(TAKE_WATCH_MS, async () => {
-        if ((await worker.observeFullTakePrices()) > 0) runner.scheduler.wakeVst?.();
-      });
-    }
+    // Always watched: open positions may carry an earlier take strategy
+    // (+5/+8/+10 %); positions without one are skipped by the worker itself.
+    every(TAKE_WATCH_MS, async () => {
+      if ((await worker.observeFullTakePrices()) > 0) runner.scheduler.wakeVst?.();
+    });
     runners.set(id, runner);
-    log(`Subscriber ${id} trading worker started (${sub.strategy}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
+    log(`Subscriber ${id} trading worker started (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
     await setRuntime(id, "started");
     return runner;
   }
@@ -291,7 +301,7 @@ export function createSubscriberTradingManager({
       }
       for (const sub of rows) {
         if (runners.has(sub.id) || !sub.trading_enabled) continue;
-        if (!SUBSCRIBER_STRATEGIES[sub.strategy]?.available) continue;
+        if (!subscriberTradingStrategy(sub)) continue;
         try { await startRunner(sub); } catch (error) {
           const reason = error instanceof Error ? error.message : "start_failed";
           log(`Subscriber ${sub.id} trading worker could not start: ${reason}`);

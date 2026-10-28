@@ -8,7 +8,11 @@ import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPer
 // @ts-expect-error JavaScript module of the bot.
 import { createBingXLiveApi } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema } from "../bullet-bot/subscriber-trading.mjs";
+import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema, subscriberTradingStrategy } from "../bullet-bot/subscriber-trading.mjs";
+// @ts-expect-error JavaScript module of the bot.
+import { EXIT_CHOICES, TRADE_PATTERNS, TRADE_PATTERN_LABELS, describeTradingStrategy, resolveTradingStrategy } from "../bullet-bot/trading-strategy.mjs";
+// @ts-expect-error JavaScript module of the bot.
+import { loadOwnerStrategy, saveOwnerStrategy } from "../bullet-bot/owner-trading-strategy.mjs";
 // @ts-expect-error JavaScript module of the bot.
 import { ALLOCATION_LIMITS, SUBSCRIBER_LEVERAGE_CHOICES, normalizePositionProfile } from "../bullet-bot/vst-position-profile.mjs";
 
@@ -34,6 +38,12 @@ function publicView(row: Row) {
     name: row.name ?? null,
     requestedAt: row.requested_at,
     strategy: row.strategy ?? null,
+    patternExit: (row.pattern_exit as string | null | undefined) ?? null,
+    patterns: typeof row.patterns === "string" && row.patterns ? row.patterns.split(",") : [],
+    strategyText: (() => {
+      const resolved = subscriberTradingStrategy(row);
+      return resolved ? describeTradingStrategy(resolved) : null;
+    })(),
     apiKeyLast4: row.api_key_last4 ?? null,
     apiKeyVerifiedAt: row.api_key_verified_at ?? null,
     apiKeyError: row.api_key_error ?? null,
@@ -117,6 +127,7 @@ router.get("/me/subscription", async (req, res) => {
   res.json({
     subscription: publicView(row),
     strategies: Object.entries(strategies).map(([id, s]) => ({ id, label: s.label, available: s.available })),
+    strategyChoices: strategyChoices(),
     keysConfigured: subscriberKeysConfigured(),
     positionChoices: { leverage: SUBSCRIBER_LEVERAGE_CHOICES, allocation: ALLOCATION_LIMITS },
   });
@@ -194,16 +205,50 @@ router.delete("/me/api-key", async (req, res) => {
   res.json({ removed: true });
 });
 
+/** Choices for the strategy pickers (subscriber cabinet and owner journal). */
+function strategyChoices() {
+  return {
+    strategies: Object.entries(strategies).map(([id, s]) => ({ id, label: s.label })),
+    exits: Object.entries(EXIT_CHOICES as Record<string, { label: string }>)
+      .map(([id, e]) => ({ id, label: e.label })),
+    patterns: (TRADE_PATTERNS as string[]).map((id) => ({
+      id, label: (TRADE_PATTERN_LABELS as Record<string, string>)[id] })),
+  };
+}
+
+type StrategyChoice = { strategy: string; patternExit: string | null; patterns: string[] | null };
+function strategyChoiceFrom(body: unknown): StrategyChoice | { error: string } {
+  const b = (body ?? {}) as Record<string, unknown>;
+  const choice = {
+    strategy: String(b.strategy ?? ""),
+    patternExit: b.strategy === "patterns" ? String(b.patternExit ?? "") : null,
+    patterns: b.strategy === "patterns" && Array.isArray(b.patterns) ? b.patterns.map(String) : null,
+  };
+  try {
+    const resolved = resolveTradingStrategy(choice);
+    return { strategy: resolved.strategy, patternExit: resolved.patternExit ?? null,
+      patterns: resolved.patterns ?? null };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : "invalid_strategy" };
+  }
+}
+const STRATEGY_ERRORS: Record<string, string> = {
+  unknown_strategy: "Такой стратегии нет",
+  pattern_exit_required: "Выберите выход для стратегии «По паттернам»",
+  patterns_must_be_1_to_3_of_4: "Выберите от 1 до 3 паттернов",
+};
+
 router.post("/me/strategy", async (req, res) => {
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  const strategy = String(req.body?.strategy ?? "");
-  if (!strategies[strategy]) return refuse(res, 422, "unknown_strategy", "Такой стратегии нет");
-  if (!strategies[strategy].available) return refuse(res, 422, "strategy_not_available", "Эта стратегия пока в разработке");
+  const choice = strategyChoiceFrom(req.body);
+  if ("error" in choice) return refuse(res, 422, choice.error, STRATEGY_ERRORS[choice.error] ?? "Неверная стратегия");
   if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
-  await pool.query("UPDATE subscribers SET strategy = $2, version = version + 1, updated_at = now() WHERE id = $1",
-    [row.id, strategy]);
-  res.json({ strategy });
+  await pool.query(
+    `UPDATE subscribers SET strategy = $2, pattern_exit = $3, patterns = $4,
+       version = version + 1, updated_at = now() WHERE id = $1`,
+    [row.id, choice.strategy, choice.patternExit, choice.patterns?.join(",") ?? null]);
+  res.json(choice);
 });
 
 router.post("/me/position-settings", async (req, res) => {
@@ -248,7 +293,7 @@ router.post("/me/trading", async (req, res) => {
   if (enable) {
     if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
     if (!row.api_key_verified_at) return refuse(res, 422, "no_key", "Сначала добавьте и проверьте ключ BingX");
-    if (!row.strategy || !strategies[String(row.strategy)]?.available) {
+    if (!subscriberTradingStrategy(row)) {
       return refuse(res, 422, "no_strategy", "Выберите стратегию");
     }
     await pool.query(
@@ -265,6 +310,26 @@ router.post("/me/trading", async (req, res) => {
 });
 
 // ---------------- owner ----------------
+
+// The owner's own strategy (owner 2026-10-28). Applies to the owner's bot's
+// NEW entries within ~15 s; open positions keep the strategy they opened with.
+router.get("/journal/trading-strategy", requireJournalSession, requireJournalOwner, async (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  const current = await loadOwnerStrategy(pool);
+  res.json({
+    strategy: current.strategy, patternExit: current.patternExit ?? null,
+    patterns: current.patterns ?? [], strategyText: describeTradingStrategy(current),
+    updatedAt: current.updatedAt, choices: strategyChoices(),
+  });
+});
+
+router.post("/journal/trading-strategy", requireJournalSession, requireJournalOwner, async (req, res) => {
+  const choice = strategyChoiceFrom(req.body);
+  if ("error" in choice) return refuse(res, 422, choice.error, STRATEGY_ERRORS[choice.error] ?? "Неверная стратегия");
+  const saved = await saveOwnerStrategy(pool, choice);
+  res.json({ strategy: saved.strategy, patternExit: saved.patternExit ?? null,
+    patterns: saved.patterns ?? [], strategyText: describeTradingStrategy(saved) });
+});
 
 router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, async (_req, res) => {
   res.setHeader("Cache-Control", "no-store");

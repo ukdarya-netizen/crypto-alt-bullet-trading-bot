@@ -383,20 +383,9 @@ function validateRules(patternId, symbol, rules) {
     throw new TypeError("Exit rules contain invalid stop thresholds");
   }
 
-  if (btc) {
-    if (
-      rules.breakevenAtPct !== 1 ||
-      rules.protectedProfitAtPct !== 0 ||
-      rules.protectedProfitPct !== 0 ||
-      rules.trailingActivationPct !== 2 ||
-      rules.trailingGapPercentagePoints !== 1 ||
-      rules.progressMilestoneIntervalPct !== 1 ||
-      Object.hasOwn(rules, "runner")
-    ) {
-      throw new TypeError("Unsupported BTC exit ladder");
-    }
-  } else if (!isSupportedSourceLadder(rules)) {
-    throw new TypeError("Unsupported non-BTC exit ladder");
+  // Owner 2026-10-28: follow CAB's ladder for every symbol; check coherence only.
+  if (!isSupportedSourceLadder(rules)) {
+    throw new TypeError(btc ? "Unsupported BTC exit ladder" : "Unsupported non-BTC exit ladder");
   }
 
   if (patternId === "impulse_buy" && !btc) {

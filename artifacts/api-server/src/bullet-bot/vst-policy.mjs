@@ -88,18 +88,13 @@ function validateRules(signal) {
     throw new TypeError("Unsupported VST exit-rule semantics");
   }
 
-  const btc = isBtc(signal.symbol);
-  if (btc) {
-    if (rules.firstTargetPct !== 10 ||
-        rules.breakevenAtPct !== 1 ||
-        rules.protectedProfitAtPct !== 10 ||
-        rules.protectedProfitPct !== 5 ||
-        rules.trailingActivationPct !== 15 ||
-        rules.trailingGapPercentagePoints !== 10) {
-      throw new TypeError("Unsupported BTC VST exit ladder");
-    }
-  } else if (!isSupportedSourceLadder(rules)) {
-    throw new TypeError("Unsupported non-BTC VST exit ladder");
+  // Owner 2026-10-28: the bot follows CAB's own ladder for every symbol,
+  // BTC included (CAB: B.U. +1%, trailing from +2% at 1 pp). Only coherence
+  // is checked; a hard-coded copy of CAB's numbers rejected valid BTC signals.
+  if (!isSupportedSourceLadder(rules)) {
+    throw new TypeError(isBtc(signal.symbol)
+      ? "Unsupported BTC VST exit ladder"
+      : "Unsupported non-BTC VST exit ladder");
   }
 
   if (signal.patternId === "impulse_buy") {

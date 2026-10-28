@@ -49,7 +49,7 @@ export const VST_ENTRY_BATCH_LIMITS = Object.freeze({
 
 export function createConfiguredVstWorker({
   store, broker, workerFactory = createVstWorker, onBlocked, onTiming, entryGuard,
-  shouldYieldToUrgentWork,
+  shouldYieldToUrgentWork, entryExitStrategyGetter = null, allowedPatterns = null,
 }) {
   const sourceExitStoreMethods = [
     "queueSourceExitRequests",
@@ -67,8 +67,12 @@ export function createConfiguredVstWorker({
     sizingLimits: VST_SIZING_LIMITS,
     sourceExitsEnabled: true,
     strategyAuthority: "source",
+    // Legacy positions without a pinned strategy were opened under +5%; new
+    // entries use the owner's chosen strategy (entryExitStrategyGetter).
     exitStrategy: "full_take_5pct",
     positionStrategySwitching: true,
+    entryExitStrategyGetter,
+    allowedPatterns,
     entryGuard,
     shouldYieldToUrgentWork,
     ...VST_ENTRY_BATCH_LIMITS,

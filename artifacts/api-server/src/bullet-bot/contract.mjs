@@ -82,17 +82,8 @@ export function validateSignal(s, now = Date.now()) {
   )
     return reject(422, "unsupported_exit_rules", "payload.exitRules");
   const btc = s.symbol === "BTCUSDT";
-  const ladder = btc
-    ? r.firstTargetPct === 1 &&
-      r.breakevenAtPct === 1 &&
-      r.protectedProfitAtPct === 0 &&
-      r.protectedProfitPct === 0 &&
-      r.trailingActivationPct === 2 &&
-      r.trailingGapPercentagePoints === 1 &&
-      r.progressMilestoneIntervalPct === 1 &&
-      !Object.hasOwn(r, "runner")
-    : isSupportedSourceLadder(r);
-  if (!ladder) return reject(422, "unsupported_ladder", "payload.exitRules");
+  // Owner 2026-10-28: CAB's ladder is followed for every symbol; only coherence is checked.
+  if (!isSupportedSourceLadder(r)) return reject(422, "unsupported_ladder", "payload.exitRules");
   if (!btc && s.patternId === "impulse_buy") {
     const runner = r.runner;
     if (

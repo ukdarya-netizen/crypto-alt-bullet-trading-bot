@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { exactDecimalParts } from "./vst-exact-decimal.mjs";
-import { FULL_TAKE_REASON } from "./fixed-price-take-profit.mjs";
+import { fullTakePct, fullTakeReason } from "./fixed-price-take-profit.mjs";
 
 export const NATIVE_TAKE_PHASE = "native-full-take";
 const nativeSymbol = (symbol) => symbol.replace(/-?USDT$/, "-USDT");
@@ -36,12 +36,13 @@ function sumDecimal(values) {
   const scale = Math.max(0, ...parts.map((p) => p.scale));
   return decimalText(parts.reduce((n, p) => n + p.units * 10n ** BigInt(scale - p.scale), 0n), scale);
 }
-export function nativeTakePrice(entry, precision) {
+export function nativeTakePrice(entry, precision, pct = 5) {
   const p = exactDecimalParts(entry);
   if (!p || p.units <= 0n || !Number.isInteger(precision) || precision < 0 || precision > 18)
     throw new Error("native_take_price_precision_unverified");
+  if (!Number.isSafeInteger(pct) || pct <= 0) throw new Error("native_take_pct_invalid");
   const divisor = 100n * 10n ** BigInt(p.scale);
-  const numerator = p.units * 105n * 10n ** BigInt(precision);
+  const numerator = p.units * BigInt(100 + pct) * 10n ** BigInt(precision);
   const ticks = (numerator + divisor - 1n) / divisor;
   const digits = ticks.toString().padStart(precision + 1, "0");
   return precision ? `${digits.slice(0, -precision)}.${digits.slice(-precision)}` : digits;
@@ -138,8 +139,9 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
   async function create(binding, stops, onAttemptStarted) {
     assertVst();
     const filters = await contract(binding.symbol);
-    if (!equal(binding.takePrice, nativeTakePrice(binding.entryPrice, filters.pricePrecision)))
-      throw new Error("native_take_target_is_not_full_five_percent");
+    if (!equal(binding.takePrice,
+      nativeTakePrice(binding.entryPrice, filters.pricePrecision, binding.takePct ?? 5)))
+      throw new Error("native_take_target_is_not_the_strategy_take");
     const verify = async () => {
       const [positions, orders, mode, margin, leverage, entry] = await Promise.all([
         readPositions(binding.symbol), readOrders(binding.symbol), getPositionMode(),
@@ -258,7 +260,8 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
         throw new Error("native_take_account_cohort_invalid");
       return { positions, orders };
     },
-    plan: async (symbol, entryPrice) => nativeTakePrice(entryPrice, (await contract(symbol)).pricePrecision),
+    plan: async (symbol, entryPrice, pct = 5) =>
+      nativeTakePrice(entryPrice, (await contract(symbol)).pricePrecision, pct),
     async hasPosition(binding) {
       const rows = positionRows(await readPositions(binding.symbol), binding);
       return rows.length === 1 && equal(rows[0].positionAmt, binding.quantity);
@@ -430,7 +433,9 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     const state = record.snapshot ?? record;
     if (state.executionStrategy && state.executionStrategy.version !== 1)
       throw new TypeError("Unsupported position strategy version");
-    if ((state.executionStrategy?.exitStrategy ?? legacyExitStrategy) !== "full_take_5pct") return;
+    // +5 / +8 / +10 % (owner 2026-10-28); any other strategy has no native take.
+    const takePct = fullTakePct(state.executionStrategy?.exitStrategy ?? legacyExitStrategy);
+    if (takePct === null) return;
     if (createDeferred(record.sourceSignalId)) return;
     if (record.status !== "open" || state.environment !== "vst" || Number(state.leverage) !== 10 ||
         !positive(state.remainingQty) || !state.exchangePositionId || !state.entryOrderId ||
@@ -440,14 +445,14 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
     if (existing && !["failed", "reconciled"].includes(existing.state)) return;
     if (existing && Number(clock()) - Date.parse(existing.updatedAt) < 5_000) return;
     const revision = existing ? Number(existing.request.revision ?? 0) + 1 : 0;
-    const takePrice = await native.plan(state.symbol, state.entryPrice);
+    const takePrice = await native.plan(state.symbol, state.entryPrice, takePct);
     const clientOrderId = `nt_${createHash("sha256").update(JSON.stringify([
       state.accountId, record.sourceSignalId, state.entryOrderId, state.exchangePositionId, revision,
     ])).digest("hex").slice(0, 28)}`;
     const binding = { symbol: state.symbol, positionId: state.exchangePositionId,
       entryOrderId: state.entryOrderId, entryPrice: String(state.entryPrice),
       quantity: String(state.remainingQty), takePrice, workingType: "CONTRACT_PRICE",
-      clientOrderId, createdAt: Number(clock()) };
+      clientOrderId, createdAt: Number(clock()), ...(takePct === 5 ? {} : { takePct }) };
     if (!await native.hasPosition(binding)) return;
     const reservation = await store.reserveIntent({ sourceSignalId: record.sourceSignalId,
       phase: `${NATIVE_TAKE_PHASE}-${revision}`, clientOrderId, request: {
@@ -556,19 +561,20 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
       // Verify cleanup before committing an irreversible closed ledger row.
       const after = await native.inspect(binding);
       if (after.positions.length || after.orders.length) return;
-      const fill = { ...evidence.fill, reason: FULL_TAKE_REASON };
+      const takeReason = fullTakeReason(binding.takePct ?? 5);
+      const fill = { ...evidence.fill, reason: takeReason };
       const position = { ...record.snapshot, sourceSignalId: intent.sourceSignalId,
         status: "closed", remainingQty: 0, coreQty: 0, runnerQty: 0, coreOpen: false,
-        runnerOpen: false, closedAt: fill.at, closeReason: FULL_TAKE_REASON,
+        runnerOpen: false, closedAt: fill.at, closeReason: takeReason,
         closeFill: fill, lastCloseFill: fill, nativeTake: { ...binding, status: "filled" },
-        sourceExit: { reason: FULL_TAKE_REASON, fill, origin: "native_take_profit" } };
+        sourceExit: { reason: takeReason, fill, origin: "native_take_profit" } };
       await store.commitVerifiedIntent({
         sourceSignalId: intent.sourceSignalId, clientOrderId: intent.clientOrderId,
         position, signalStatus: "closed", exchangeOrderId: evidence.childOrderId,
         outcome: { verified: true, status: "filled", fill, binding },
         eventKind: "vst_source_exit_closed",
-        eventDetail: { reason: FULL_TAKE_REASON,
-          sourceEvidence: { reason: FULL_TAKE_REASON, issuer: "executor_policy" },
+        eventDetail: { reason: takeReason,
+          sourceEvidence: { reason: takeReason, issuer: "executor_policy" },
           closureOrigin: "native_take_profit",
           positionId: binding.positionId, fill },
         expectedPositionSnapshot: record.snapshot,

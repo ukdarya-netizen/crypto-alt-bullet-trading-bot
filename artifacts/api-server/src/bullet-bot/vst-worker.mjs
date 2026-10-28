@@ -42,8 +42,9 @@ import { coordinateVstEntryBatch } from "./vst-entry-batch/coordinator.mjs";
 import { evaluatePreRunnerCloseRetry } from "./vst-close-retry-guard.mjs";
 import { applySourceProtection, evaluateSourceFollower } from "./source-position-control.mjs";
 import { isTradablePatternId } from "./pattern-eligibility.mjs";
-import { FULL_TAKE_5PCT, FULL_TAKE_REASON, fullTakeRequest, fullTakeRequestId,
-  fullTakeEvidenceValid, fullTakeRowFromTouch } from "./fixed-price-take-profit.mjs";
+import { entryExitStrategy } from "./trading-strategy.mjs";
+import { fullTakeRequest, fullTakeRequestId, isFullTakeStrategy,
+  isFullTakeReason, fullTakeEvidenceValid, fullTakeRowFromTouch } from "./fixed-price-take-profit.mjs";
 
 function safeVstProofEvidence(source, getChecks) {
   try {
@@ -1495,6 +1496,13 @@ export function createVstWorker({
   strategyAuthority = "policy",
   exitStrategy = "source",
   positionStrategySwitching = false,
+  // Owner 2026-10-28: the trading strategy can change while the worker runs
+  // (owner's settings). A getter returning "source" | "full_take_5pct" |
+  // "full_take_8pct" | "full_take_10pct" decides the exit pinned on each NEW
+  // entry; open positions keep the strategy they were opened with.
+  entryExitStrategyGetter = null,
+  // Getter returning a Set of tradable pattern ids, or null for all patterns.
+  allowedPatterns = null,
   entryGuard,
   shouldYieldToUrgentWork,
   entryBatchSize = 1,
@@ -1507,11 +1515,24 @@ export function createVstWorker({
 }) {
   const PROFILE = normalizePositionProfile(positionProfile);
   const strategyDefaults = capturePositionStrategy({ exitStrategy, strategyAuthority });
-  const fullTakePosition = (record) =>
-    positionStrategy(record.snapshot ?? record, strategyDefaults).exitStrategy === FULL_TAKE_5PCT;
+  // The full-take strategy (+5/+8/+10%) pinned on a position at entry.
+  const takeStrategyOf = (record) =>
+    positionStrategy(record?.snapshot ?? record, strategyDefaults).exitStrategy;
+  const fullTakePosition = (record) => isFullTakeStrategy(takeStrategyOf(record));
+  // Strategy pinned on a new entry: the owner's current choice (when a getter
+  // is configured), BTC always following CAB.
+  function newEntryStrategy(symbol) {
+    let chosen = exitStrategy;
+    if (typeof entryExitStrategyGetter === "function") {
+      try { chosen = entryExitStrategyGetter() ?? exitStrategy; } catch { chosen = exitStrategy; }
+    }
+    const pinned = entryExitStrategy(chosen, symbol);
+    return pinned === strategyDefaults.exitStrategy ? strategyDefaults
+      : capturePositionStrategy({ exitStrategy: pinned, strategyAuthority });
+  }
   const nativeTakeProfit =
     typeof broker.createNativeTakeProfitManager === "function" &&
-    (exitStrategy === FULL_TAKE_5PCT || typeof store.listNativeTakeIntents === "function")
+    (isFullTakeStrategy(exitStrategy) || typeof store.listNativeTakeIntents === "function")
     ? broker.createNativeTakeProfitManager(store, { legacyExitStrategy: exitStrategy }) : null;
   const PROFILE_LEVERAGE = PROFILE.leverage;
   const PROFILE_MARGIN = PROFILE.marginMode;
@@ -1559,7 +1580,9 @@ export function createVstWorker({
 
   function latchedFullTakeEvidence(record) {
     const state = record?.snapshot ?? {};
-    const requestId = fullTakeRequestId(record?.sourceSignalId, state.entryPrice);
+    if (!fullTakePosition(record)) return null;
+    const requestId = fullTakeRequestId(record?.sourceSignalId, state.entryPrice,
+      takeStrategyOf(record));
     for (const candidate of [fullTakeLatches.get(record?.sourceSignalId), state.fullTakeLatch]) {
       if (fullTakeEvidenceValid(candidate, record?.sourceSignalId, state.symbol, requestId)) {
         return candidate;
@@ -1593,11 +1616,12 @@ export function createVstWorker({
       const rebuilt = fullTakeRowFromTouch({
         sourceSignalId: record.sourceSignalId, symbol: record.snapshot?.symbol,
         entryPrice: detail.entryPrice, observedPrice: detail.observedPrice,
-        observedAt: detail.observedAt,
+        observedAt: detail.observedAt, strategy: takeStrategyOf(record),
       });
       if (detail.symbol === record.snapshot?.symbol &&
           fullTakeEvidenceValid(rebuilt.evidence, record.sourceSignalId, record.snapshot?.symbol,
-            fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice))) {
+            fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice,
+              takeStrategyOf(record)))) {
         fullTakeLatches.set(record.sourceSignalId, rebuilt.evidence);
       }
     }
@@ -1663,7 +1687,7 @@ export function createVstWorker({
   // Read-only towards the exchange: one bulk last-price read. Returns the
   // number of new touches so the caller can wake the worker.
   async function observeFullTakePrices() {
-    if (exitStrategy !== FULL_TAKE_5PCT && !positionStrategySwitching) return 0;
+    if (!isFullTakeStrategy(exitStrategy) && !positionStrategySwitching) return 0;
     if (typeof store.listOpenPositions !== "function") return 0;
     const open = (await store.listOpenPositions()).filter((record) =>
       record?.status !== "closed" && fullTakePosition(record));
@@ -1683,7 +1707,8 @@ export function createVstWorker({
         const quote = bySymbol.get(record.snapshot.symbol);
         if (!quote) continue;
         const row = fullTakeRequest({ ...record.snapshot, sourceSignalId: record.sourceSignalId },
-          { ...quote, price: quote.priceDecimal ?? quote.price }, Number(clock()));
+          { ...quote, price: quote.priceDecimal ?? quote.price }, Number(clock()),
+          takeStrategyOf(record));
         if (!row) continue;
         fullTakeLatches.set(record.sourceSignalId, row.evidence);
         latched += 1;
@@ -1931,7 +1956,7 @@ export function createVstWorker({
   }
 
   async function processLatchedFullTakes(recordTiming = null) {
-    if (exitStrategy !== FULL_TAKE_5PCT && !positionStrategySwitching) return null;
+    if (!isFullTakeStrategy(exitStrategy) && !positionStrategySwitching) return null;
     const startedAt = performance.now();
     try {
       const open = (await store.listOpenPositions()).filter((record) =>
@@ -1961,9 +1986,10 @@ export function createVstWorker({
           await noteFullTakeProgress(record, "source_exit_capabilities_unavailable");
           continue;
         }
-        const requestId = fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice);
+        const requestId = fullTakeRequestId(record.sourceSignalId, record.snapshot?.entryPrice,
+          takeStrategyOf(record));
         const row = { requestId, sourceSignalId: record.sourceSignalId, symbol,
-          reason: FULL_TAKE_REASON, asOf: evidence.asOf, observedAt: evidence.observedAt, evidence };
+          reason: evidence.reason, asOf: evidence.asOf, observedAt: evidence.observedAt, evidence };
         let result;
         let completed = null;
         directCloseCompletion = { requestId, completed: null };
@@ -2014,7 +2040,9 @@ export function createVstWorker({
       }
     }
   }
-  if (!["source", FULL_TAKE_5PCT].includes(exitStrategy)) throw new TypeError("Invalid exit strategy");
+  if (exitStrategy !== "source" && !isFullTakeStrategy(exitStrategy)) {
+    throw new TypeError("Invalid exit strategy");
+  }
   if (!store) throw new TypeError("A separate VST store is required");
   if (!["policy", "source"].includes(strategyAuthority)) {
     throw new TypeError("VST strategyAuthority must be source or policy");
@@ -2170,7 +2198,7 @@ export function createVstWorker({
       const existing = await store.getIntent(signalId, phase);
       // Replays inherit their original journalled choice. Old requests must
       // retain their exact shape, otherwise idempotency comparisons would fail.
-      const bound = existing ? existing.request?.executionStrategy : strategyDefaults;
+      const bound = existing ? existing.request?.executionStrategy : newEntryStrategy(request.symbol);
       if (bound) request.executionStrategy = bound;
     }
     const journaled = isStopTransferOperation(request.operation) &&
@@ -7093,6 +7121,21 @@ export function createVstWorker({
       ? await entryGuard(signal.sourceSignalId) : false;
     if (entryBlock === "maintenance") return { kind: "waiting", reason: "owner_reset_in_progress",
       sourceSignalId: signal.sourceSignalId, symbol: signal.symbol };
+    // Strategy "По паттернам": signals of patterns outside the choice are
+    // skipped quietly (no "not opened" notice; it is the owner's choice).
+    let tradable = null;
+    try { tradable = typeof allowedPatterns === "function" ? allowedPatterns() : allowedPatterns; }
+    catch { tradable = null; }
+    if (tradable instanceof Set && typeof signal?.sourceSignalId === "string" &&
+        !tradable.has(signal?.patternId)) {
+      const prior = await store.getIntent(signal.sourceSignalId, "market-entry");
+      if (!prior || prior.state === "failed") {
+        await store.setSignalStatus(signal.sourceSignalId, "rejected", "pattern_not_in_strategy");
+        await store.recordEvent?.(signal.sourceSignalId, "vst_signal_skipped_by_strategy",
+          { reason: "pattern_not_in_strategy", patternId: signal.patternId ?? null });
+        return { kind: "rejected", reason: "pattern_not_in_strategy" };
+      }
+    }
     if (entryBlock) {
       const prior = await store.getIntent(signal.sourceSignalId, "market-entry");
       if (!prior || prior.state === "failed") {
@@ -11533,22 +11576,23 @@ export function createVstWorker({
     // This is an explicitly approved executor rule, not a fabricated source
     // instruction. The full-exit lane still verifies exact own fills, account,
     // position quantity, and each residual stop before committing a closure.
-    if (exitStrategy === FULL_TAKE_5PCT && allowActions && !directCommand &&
+    if (isFullTakeStrategy(exitStrategy) && allowActions && !directCommand &&
         (Number(state.remainingQty) > 0 ||
-          state.sourceExitEvidence?.rule === FULL_TAKE_5PCT)) {
-      const requestId = fullTakeRequestId(record.sourceSignalId, state.entryPrice);
+          state.sourceExitEvidence?.rule === exitStrategy)) {
+      const requestId = fullTakeRequestId(record.sourceSignalId, state.entryPrice, exitStrategy);
       const prior = await store.getIntent(record.sourceSignalId, sourceExitPhase(requestId));
       const saved = prior?.request?.sourceExit?.evidence ?? state.sourceExitEvidence ??
         latchedFullTakeEvidence(record);
       let row = fullTakeEvidenceValid(saved, record.sourceSignalId, state.symbol, requestId)
         ? { requestId, sourceSignalId: record.sourceSignalId, symbol: state.symbol,
-          reason: FULL_TAKE_REASON, asOf: saved.asOf, observedAt: saved.observedAt, evidence: saved }
+          reason: saved.reason, asOf: saved.asOf, observedAt: saved.observedAt, evidence: saved }
         : null;
       if (!row) {
         let mark;
         try { mark = await broker.readMarketMark(state.symbol); }
         catch { return { kind: "waiting", reason: "verified_market_mark_unavailable" }; }
-        row = fullTakeRequest({ ...state, sourceSignalId: record.sourceSignalId }, mark, Number(clock()));
+        row = fullTakeRequest({ ...state, sourceSignalId: record.sourceSignalId }, mark, Number(clock()),
+          exitStrategy);
       }
       if (row) {
         directCloseCompletion = { requestId, completed: null };
@@ -13025,7 +13069,7 @@ export function createVstWorker({
 
   function sourceExitRequestValid(row) {
     const evidence = row?.evidence;
-    if (row?.reason === FULL_TAKE_REASON) return fullTakeEvidenceValid(
+    if (isFullTakeReason(row?.reason)) return fullTakeEvidenceValid(
       evidence, row.sourceSignalId, row.symbol, row.requestId);
     if (row?.reason === "source_command_close") {
       try {

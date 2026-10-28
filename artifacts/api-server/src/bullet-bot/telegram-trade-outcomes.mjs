@@ -1,3 +1,4 @@
+import { isFullTakeReason, isFullTakeStrategy } from "./fixed-price-take-profit.mjs";
 // Owner policy: Telegram reports trade outcomes only. Diagnostics, watchdogs,
 // margin operations and intermediate reconciliation remain in logs/the journal.
 export const TECHNICAL_TELEGRAM_ALERTS_ENABLED = false;
@@ -15,8 +16,7 @@ function confirmedCloseOutcome(event) {
     detail.detail?.sourceEvidence ?? event.request?.sourceExit?.evidence ??
     event.request?.nextPolicy?.sourceExitEvidence ?? event.outcome?.sourceEvidence;
   if (evidence?.sourceStatus === "cancelled") return "cancelled";
-  if (evidence?.rule === "full_take_5pct" ||
-      evidence?.reason === "fixed_price_take_profit_5pct") return "take";
+  if (isFullTakeStrategy(evidence?.rule) || isFullTakeReason(evidence?.reason)) return "take";
   return "closed";
 }
 

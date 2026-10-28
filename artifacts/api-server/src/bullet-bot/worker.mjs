@@ -23,7 +23,7 @@ import {
 } from "./paper-funding.mjs";
 import { buildSourceExitEvidence } from "./source-exit-evidence.mjs";
 import { applySourceProtection, evaluateSourceFollower } from "./source-position-control.mjs";
-import { FULL_TAKE_5PCT, applyFullTake } from "./fixed-price-take-profit.mjs";
+import { applyFullTake, isFullTakeStrategy } from "./fixed-price-take-profit.mjs";
 import { validateSourceCommand, directCloseRequest } from "./source-command-contract.mjs";
 
 const MAX_PAPER_ENTRIES_PER_TICK = 10;
@@ -135,7 +135,9 @@ function orderLinkId(id, suffix = "") {
 /** One leader-locked pass; all durable operations use the store's PostgreSQL tables. */
 export function createWorker({ store, exchange, feeReader, mode = "paper", clock = Date.now,
   strategyAuthority = "policy", entryGuard, exitStrategy = "source" }) {
-  if (!["source", FULL_TAKE_5PCT].includes(exitStrategy)) throw new TypeError("Invalid exit strategy");
+  if (exitStrategy !== "source" && !isFullTakeStrategy(exitStrategy)) {
+    throw new TypeError("Invalid exit strategy");
+  }
   if (!["policy", "source"].includes(strategyAuthority)) {
     throw new TypeError("PAPER strategyAuthority must be source or policy");
   }
@@ -555,9 +557,9 @@ export function createWorker({ store, exchange, feeReader, mode = "paper", clock
         sourceSignalId: position.sourceSignalId, symbol: position.symbol,
       }, price, { observedAt });
     }
-    if (exitStrategy === FULL_TAKE_5PCT) {
-      result = applyFullTake(result, evaluationPosition, price, observedAt);
-      result.next.exitStrategy = FULL_TAKE_5PCT;
+    if (isFullTakeStrategy(exitStrategy)) {
+      result = applyFullTake(result, evaluationPosition, price, observedAt, exitStrategy);
+      result.next.exitStrategy = exitStrategy;
     }
     if (sourceExitEvidence) {
       // A source close or withdrawal is a PAPER-only exit instruction. Source
