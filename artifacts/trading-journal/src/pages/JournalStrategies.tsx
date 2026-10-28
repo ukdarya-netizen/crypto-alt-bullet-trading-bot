@@ -12,6 +12,7 @@ import {
   exitRule, knownPatterns, ruleLabel, strategyDefinitions, type StrategyId,
 } from "./strategy-definitions";
 import { returnFor } from "./strategy-returns";
+import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 
 type Trade = Awaited<ReturnType<typeof getJournalStrategyHistory>>["trades"][number];
 type History = Awaited<ReturnType<typeof getJournalStrategyHistory>>;
@@ -217,7 +218,7 @@ function PatternHistory({ pattern, name, trades, history, strategyId }: {
   );
 }
 
-export default function JournalStrategies() {
+function LegacyStrategies() {
   const [selectedStrategy, setSelectedStrategy] = useState<StrategyId>(4);
   const { data, isLoading, error } = useGetJournalStrategyHistory({
     query: {
@@ -361,5 +362,24 @@ export default function JournalStrategies() {
       )}
       </details>
     </section>
+  );
+}
+/** Owner 2026-10-28: the 5 bot strategies with background PAPER on top; the old
+ * 4 PAPER exit schemes stay below as an archive. */
+export default function JournalStrategies() {
+  const [archive, setArchive] = useState(false);
+  return (
+    <div className="space-y-6">
+      <div className="page-frame mx-auto max-w-5xl">
+        <OwnerStrategyCard />
+      </div>
+      <div className="page-frame mx-auto max-w-5xl">
+        <button type="button" onClick={() => setArchive((v) => !v)}
+          className="text-xs font-semibold text-muted-foreground underline">
+          {archive ? "Скрыть архив" : "Архив: старые 4 схемы PAPER (до 28.10.2026)"}
+        </button>
+      </div>
+      {archive && <LegacyStrategies />}
+    </div>
   );
 }

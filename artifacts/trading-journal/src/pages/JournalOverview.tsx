@@ -1,5 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "wouter";
+import { StrategyPaperPanel } from "@/components/strategy-paper-panel";
+import { api } from "@/lib/subscriber-api";
 import {
   Bar, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
@@ -332,6 +335,7 @@ function VstView({ period }: { period: PeriodId }) {
 
   return (
     <div className="space-y-5">
+      <OwnerStrategyLine />
       <Hero
         title="Бот на BingX VST · прибыль за период"
         netUsdt={summary.netUsdt}
@@ -406,7 +410,7 @@ function VstView({ period }: { period: PeriodId }) {
   );
 }
 
-function PaperView({ period }: { period: PeriodId }) {
+function LegacyPaperView({ period }: { period: PeriodId }) {
   const now = Date.now();
   const history = useGetJournalStrategyHistory({
     query: { queryKey: getGetJournalStrategyHistoryQueryKey(), refetchInterval: 60_000 },
@@ -487,6 +491,38 @@ function PaperView({ period }: { period: PeriodId }) {
   );
 }
 
+/** The owner's current bot strategy, with a link to change it. */
+function OwnerStrategyLine() {
+  const query = useQuery({
+    queryKey: ["owner-trading-strategy"],
+    queryFn: () => api<{ strategyText: string }>("/journal/trading-strategy"),
+  });
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border border-border bg-card px-4 py-3 text-sm" data-testid="owner-strategy-line">
+      <span>Стратегия бота: <span className="font-semibold">{query.data?.strategyText ?? (query.error ? "не загрузилась" : "…")}</span></span>
+      <Link href="/journal/strategies" className="text-xs text-primary hover:underline">Сменить стратегию →</Link>
+    </div>
+  );
+}
+
+/** Owner 2026-10-28: background PAPER of the 5 bot strategies (% to deposit). */
+function PaperView({ period }: { period: PeriodId }) {
+  const [archive, setArchive] = useState(false);
+  return (
+    <div className="space-y-5">
+      <div className="border border-border bg-card p-4">
+        <StrategyPaperPanel endpoint="/journal/strategy-paper" />
+        <Link href="/journal/strategies" className="mt-3 inline-block text-xs text-primary hover:underline">Выбрать стратегию бота →</Link>
+      </div>
+      <button type="button" onClick={() => setArchive((v) => !v)}
+        className="text-xs font-semibold text-muted-foreground underline">
+        {archive ? "Скрыть архив" : "Архив: старые 4 схемы PAPER (до 28.10.2026)"}
+      </button>
+      {archive && <LegacyPaperView period={period} />}
+    </div>
+  );
+}
+
 export default function JournalOverview() {
   const [period, setPeriod] = useState<PeriodId>(() => readStored(PERIOD_KEY, PERIODS.map((p) => p.id), "30d"));
   const [view, setView] = useState<View>(() => readStored<View>(VIEW_KEY, ["vst", "paper"], "vst"));
@@ -494,7 +530,7 @@ export default function JournalOverview() {
     <section className="page-frame mx-auto max-w-5xl space-y-5" aria-label="Обзор" data-testid="page-overview">
       <div className="grid gap-2 sm:grid-cols-[auto_1fr] sm:items-center">
         <Segmented label="Счёт" value={view} onChange={(value) => { setView(value); store(VIEW_KEY, value); }}
-          options={[{ id: "vst", label: "VST · бот" }, { id: "paper", label: "PAPER · стратегии" }]} />
+          options={[{ id: "vst", label: "VST · бот" }, { id: "paper", label: "Стратегии · paper" }]} />
         <div className="sm:justify-self-end sm:w-[420px]">
           <Segmented label="Период" value={period} onChange={(value) => { setPeriod(value); store(PERIOD_KEY, value); }}
             options={PERIODS} />

@@ -12,7 +12,6 @@ import { formatDate, formatNumber } from "@/lib/utils";
 import { sortPositionsNewestFirst } from "@/lib/position-order";
 import { VstEntryQueue } from "@/components/VstEntryQueue";
 import { exchangeHistoryClosedAccounting } from "./vst-closed-history";
-import { OwnerStrategyCard } from "@/components/owner-strategy-card";
 
 type Mode = "paper" | "real" | "vst";
 type Position = {
@@ -758,7 +757,6 @@ export default function JournalPositions({ mode }: { mode: Mode }) {
       <h1 className="mt-1 text-2xl font-bold tracking-tight">{title} <span className="font-normal text-muted-foreground">/ Позиции</span></h1>
       <p className="mt-1 text-xs text-muted-foreground" data-testid={`status-${mode}-source`}>{subtitle}</p>
     </div>
-    {mode === "vst" && <OwnerStrategyCard />}
     {mode === "paper" ? <PaperBook now={now} /> : mode === "real" ? <RealBook now={now} /> : <VstBook now={now} />}
   </div>;
 }

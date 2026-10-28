@@ -19,7 +19,7 @@ const NAV_ITEMS = [
   { href: "/journal/vst", label: "VST · бот", short: "VST", sub: "BingX демо, стратегия бота", icon: Database },
   { href: "/journal", label: "PAPER", short: "PAPER", sub: "симуляция", icon: FlaskConical },
   { href: "/journal/real", label: "REAL", short: "REAL", sub: "счёт BingX", icon: Wallet },
-  { href: "/journal/strategies", label: "Стратегии", short: "Стратегии", sub: "4 схемы выхода по паттернам", icon: Target },
+  { href: "/journal/strategies", label: "Стратегии", short: "Стратегии", sub: "5 стратегий бота + paper", icon: Target },
   { href: "/journal/open", label: "Открытые", short: "Открытые", sub: "все позиции сейчас", icon: List },
   { href: "/journal/history", label: "История", short: "История", sub: "все сделки", icon: History },
   { href: "/journal/health", label: "Bot Health", short: "Health", sub: "состояние бота", icon: Activity },
