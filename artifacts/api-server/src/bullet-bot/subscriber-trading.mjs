@@ -52,6 +52,7 @@ export function subscriberTradingStrategy(row) {
 const LEADER_LOCK_BASE = 100_000;
 const REAL_LEADER_LOCK_BASE = 200_000;
 export const TRADING_ACCOUNTS = Object.freeze(["vst", "real"]);
+const runnerKey = (id, account) => `${id}:${account}`;
 /** The account this subscriber trades on: "real" only when everything allows it. */
 export function subscriberAccount(row) {
   return row?.trading_account === "real" ? "real" : "vst";
@@ -184,14 +185,22 @@ export function createSubscriberTradingManager({
     } catch {}
   }
 
-  async function startRunner(sub) {
+  /**
+   * `account` defaults to the chosen one. A DRAINING runner manages the open
+   * positions left on the other account (after a switch, a "Стоп" or a
+   * restart): it never opens new trades and does not report the cabinet
+   * status, but keeps stops, takes and CAB closes until the account is flat.
+   */
+  async function startRunner(sub, account = subscriberAccount(sub), { draining = false } = {}) {
     const id = sub.id;
-    const account = subscriberAccount(sub);
-    const strategy = subscriberTradingStrategy(sub);
+    const key = runnerKey(id, account);
+    const strategy = subscriberTradingStrategy(sub) ??
+      (draining ? { exitStrategy: "source", allowedPatterns: null, patterns: null } : null);
     if (!strategy) throw new Error("strategy_not_available");
-    if (account === "real" && (!sub.real_allowed || !sub.real_key_verified_at)) {
+    if (!draining && account === "real" && (!sub.real_allowed || !sub.real_key_verified_at)) {
       throw new Error("real_account_not_allowed_or_key_not_verified");
     }
+    const report = (status, reason) => (draining ? Promise.resolve() : setRuntime(id, status, reason));
     const stopBufferRate = Number(configuration.BULLET_VST_STOP_BUFFER_RATE);
     if (!Number.isFinite(stopBufferRate) || stopBufferRate <= 0 || stopBufferRate >= 1) {
       throw new Error("BULLET_VST_STOP_BUFFER_RATE is not configured");
@@ -220,7 +229,8 @@ export function createSubscriberTradingManager({
       api, accountId: account === "real" ? `subr-${id}` : `sub-${id}`, canarySymbols: ["BTCUSDT"], stopBufferRate,
     });
     const runner = {
-      id, account, version: sub.version, pool, store, tradingEnabled: Boolean(sub.trading_enabled),
+      id, key, account, draining, version: sub.version, pool, store,
+      tradingEnabled: !draining && Boolean(sub.trading_enabled),
       feedCursor: new Date(sub.trading_started_at ?? clock()), lastResult: null, lastReportAt: 0,
       timers: [], scheduler: null,
     };
@@ -246,13 +256,13 @@ export function createSubscriberTradingManager({
         runner.lastResult = result;
         if (clock() - runner.lastReportAt > 30_000) {
           runner.lastReportAt = clock();
-          await setRuntime(id, result?.kind ?? "idle", result?.reason ?? result?.operation ?? null);
+          await report(result?.kind ?? "idle", result?.reason ?? result?.operation ?? null);
         }
         return result;
       },
       onVstError: (error) => {
         runner.lastResult = { kind: "error", reason: error instanceof Error ? error.message : "error" };
-        void setRuntime(id, "error", runner.lastResult.reason);
+        void report("error", runner.lastResult.reason);
       },
     });
     const every = (ms, fn) => {
@@ -303,21 +313,34 @@ export function createSubscriberTradingManager({
         log(`Subscriber ${id} Telegram notifications unavailable: ${error instanceof Error ? error.message : "error"}`);
       }
     }
-    runners.set(id, runner);
-    log(`Subscriber ${id} trading worker started on ${account.toUpperCase()} (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
-    await setRuntime(id, "started");
+    runners.set(key, runner);
+    log(`Subscriber ${id} ${draining ? "DRAINING (open positions only) " : ""}trading worker started on ${account.toUpperCase()} (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
+    await report("started");
     return runner;
   }
 
-  async function stopRunner(id, reason) {
-    const runner = runners.get(id);
+  async function stopRunner(key, reason) {
+    const runner = runners.get(key);
     if (!runner) return;
-    runners.delete(id);
+    runners.delete(key);
+    const id = runner.id;
     for (const timer of runner.timers) clearInterval(timer);
     try { await runner.scheduler?.drain?.(); } catch {}
     try { await runner.pool.end(); } catch {}
-    log(`Subscriber ${id} trading worker stopped (${reason})`);
-    await setRuntime(id, "stopped", reason);
+    log(`Subscriber ${id} ${runner.account.toUpperCase()} trading worker stopped (${reason})`);
+    if (!runner.draining) await setRuntime(id, "stopped", reason);
+  }
+
+  /** Open positions in an account's ledger without a running worker (0 when it never traded). */
+  async function ledgerOpenPositions(id, account) {
+    const schema = subscriberSchema(id, account);
+    const exists = await ownerPool.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'vst_positions'`,
+      [schema]);
+    if (!exists.rowCount) return 0;
+    const { rows } = await ownerPool.query(
+      `SELECT count(*)::int AS n FROM ${schema}.vst_positions WHERE status IN ('open','closing','unknown')`);
+    return rows[0]?.n ?? 0;
   }
 
   async function openPositionCount(runner) {
@@ -335,11 +358,26 @@ export function createSubscriberTradingManager({
            AND strategy IS NOT NULL`,
       );
       const byId = new Map(rows.map((row) => [row.id, row]));
-      for (const [id, runner] of runners) {
-        const sub = byId.get(id);
-        if (!sub || sub.version !== runner.version) {
-          // Removed, blocked, or key/strategy changed: stop (restart below if still eligible).
-          await stopRunner(id, sub ? "settings_changed" : "not_eligible");
+      for (const [key, runner] of runners) {
+        const sub = byId.get(runner.id);
+        if (!sub) {
+          // Removed or blocked (a blocked person's key is not used any more).
+          await stopRunner(key, "not_eligible");
+          continue;
+        }
+        if (runner.account !== subscriberAccount(sub) || runner.draining) {
+          // The other account (or a drain): no new trades; stop once flat.
+          runner.tradingEnabled = false;
+          if (runner.account === subscriberAccount(sub) && sub.trading_enabled) {
+            await stopRunner(key, "trading_restarted"); // a full runner starts below
+          } else if ((await openPositionCount(runner)) === 0) {
+            await stopRunner(key, "account_flat");
+          }
+          continue;
+        }
+        if (sub.version !== runner.version) {
+          // Key/strategy/account settings changed: stop (restart below if still eligible).
+          await stopRunner(key, "settings_changed");
           continue;
         }
         if (!runner.tradingEnabled && sub.trading_enabled) {
@@ -348,16 +386,27 @@ export function createSubscriberTradingManager({
         }
         runner.tradingEnabled = Boolean(sub.trading_enabled);
         if (!runner.tradingEnabled && (await openPositionCount(runner)) === 0) {
-          await stopRunner(id, "stopped_by_subscriber");
+          await stopRunner(key, "stopped_by_subscriber");
         }
       }
       for (const sub of rows) {
-        if (runners.has(sub.id) || !sub.trading_enabled) continue;
-        if (!subscriberTradingStrategy(sub)) continue;
-        try { await startRunner(sub); } catch (error) {
-          const reason = error instanceof Error ? error.message : "start_failed";
-          log(`Subscriber ${sub.id} trading worker could not start: ${reason}`);
-          await setRuntime(sub.id, "error", reason);
+        const current = subscriberAccount(sub);
+        for (const account of TRADING_ACCOUNTS) {
+          if (runners.has(runnerKey(sub.id, account))) continue;
+          const trade = account === current && sub.trading_enabled && subscriberTradingStrategy(sub);
+          try {
+            if (trade) {
+              await startRunner(sub, account);
+            } else if ((await ledgerOpenPositions(sub.id, account)) > 0) {
+              // Open positions with no worker (after "Стоп", a switch or a
+              // restart): manage them until they are closed.
+              await startRunner(sub, account, { draining: true });
+            }
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : "start_failed";
+            log(`Subscriber ${sub.id} ${account.toUpperCase()} trading worker could not start: ${reason}`);
+            if (trade) await setRuntime(sub.id, "error", reason);
+          }
         }
       }
     } finally {
@@ -392,13 +441,13 @@ export function createSubscriberTradingManager({
       }
     },
     status(id) {
-      const runner = runners.get(id);
+      const runner = runners.get(runnerKey(id, "vst")) ?? runners.get(runnerKey(id, "real"));
       return runner ? { running: true, tradingEnabled: runner.tradingEnabled, lastResult: runner.lastResult } : { running: false };
     },
     async stop() {
       stopped = true;
       clearInterval(reconcileTimer);
-      for (const id of [...runners.keys()]) await stopRunner(id, "runtime_shutdown");
+      for (const key of [...runners.keys()]) await stopRunner(key, "runtime_shutdown");
     },
   };
 }

@@ -132,6 +132,12 @@ async function realAccountBalance(key: string, secret: string): Promise<string |
   return row?.balance ?? row?.equity ?? null;
 }
 
+/** Open positions on BOTH accounts (a switched-away account may still be closing trades). */
+async function openPositionsAnywhere(id: number): Promise<number> {
+  const [vst, real] = await Promise.all([performance(id, "vst"), performance(id, "real")]);
+  return vst.openPositions + real.openPositions;
+}
+
 async function performance(id: number, account = "vst") {
   if (!(await schemaExists(id, account))) return { trades: [], openPositions: 0 };
   const schema = subscriberSchema(id, account) as string;
@@ -183,7 +189,8 @@ router.get("/me/performance", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  res.json(await performance(row.id, subscriberAccount(row)));
+  const perf = await performance(row.id, subscriberAccount(row));
+  res.json({ ...perf, openPositions: await openPositionsAnywhere(row.id) });
 });
 
 router.post("/me/api-key", async (req, res) => {
@@ -192,7 +199,7 @@ router.post("/me/api-key", async (req, res) => {
   if (!subscriberKeysConfigured()) {
     return refuse(res, 503, "keys_secret_missing", "Хранилище ключей не настроено владельцем");
   }
-  if ((await performance(row.id, subscriberAccount(row))).openPositions > 0) {
+  if ((await openPositionsAnywhere(row.id)) > 0) {
     return refuse(res, 409, "positions_open", "Есть открытые сделки: ключ можно заменить после их закрытия");
   }
   const apiKey = String(req.body?.apiKey ?? "").trim();
@@ -254,7 +261,7 @@ router.post("/me/api-key", async (req, res) => {
 router.delete("/me/api-key", async (req, res) => {
   const row = await subscriberFor(req);
   // Without the key the bot cannot manage open positions (stop, take, close).
-  if ((await performance(row.id, subscriberAccount(row))).openPositions > 0) {
+  if ((await openPositionsAnywhere(row.id)) > 0) {
     return refuse(res, 409, "positions_open", "Есть открытые сделки: ключ можно удалить после их закрытия");
   }
   await pool.query(
@@ -318,8 +325,7 @@ router.post("/me/position-settings", async (req, res) => {
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
   if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
   // Open positions are managed with the leverage/margin they were opened with.
-  const perf = await performance(row.id, subscriberAccount(row));
-  if (perf.openPositions > 0) {
+  if ((await openPositionsAnywhere(row.id)) > 0) {
     return refuse(res, 409, "positions_open", "Дождитесь закрытия открытых сделок, потом меняйте настройки");
   }
   const leverage = Number(req.body?.leverage);
@@ -356,11 +362,9 @@ router.post("/me/account", async (req, res) => {
   const account = String(req.body?.account ?? "");
   if (account !== "vst" && account !== "real") return refuse(res, 422, "account", "Такого счёта нет");
   if (account === subscriberAccount(row)) return res.json({ account });
-  if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
-  const perf = await performance(row.id, subscriberAccount(row));
-  if (perf.openPositions > 0) {
-    return refuse(res, 409, "positions_open", "Дождитесь закрытия открытых сделок на текущем счёте");
-  }
+  // Open trades on the old account are not a blocker: the bot keeps managing
+  // them there (stops, takes, CAB closes) until they are closed.
+  if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала нажмите «Стоп»");
   let realVerified = Boolean(row.real_key_verified_at);
   if (account === "real") {
     if (!row.real_allowed) return refuse(res, 403, "real_not_allowed", "Владелец не разрешил реальный счёт");

@@ -276,7 +276,7 @@ function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">Реальный счёт открывает владелец.</p>
       )}
-      {sub.tradingEnabled && <p className="mt-2 text-sm text-amber-300">Торговля запущена — счёт меняется только после «Стоп» (шаг 5) и закрытия открытых сделок.</p>}
+      {sub.tradingEnabled && <p className="mt-2 text-sm text-amber-300">Торговля запущена — чтобы сменить счёт, нажмите «Стоп» (шаг 5). Ждать закрытия сделок не нужно: открытые сделки старого счёта бот доведёт до конца сам.</p>}
       {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
     </Step>
   );
