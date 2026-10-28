@@ -292,17 +292,33 @@ export async function proveNativeTakeFill(api, binding, knownStops, now = Date.n
           !equal(order.origQty ?? order.quantity, expected.quantity) ||
           !equal(order.stopPrice, expected.stopPrice)) return { verified: false };
     }
-    const linked = fills.filter((f) => {
+    let linked = fills.filter((f) => {
       const values = [f.triggerOrderId, f.triggerOrderID].filter((v) => v != null);
       if (!values.some((v) => v === binding.orderId)) return false;
       return id(f, ["triggerOrderId", "triggerOrderID"]) === binding.orderId;
     });
+    // NOT 2026-10-28: the complete VST fill history carries no triggerOrderId.
+    // The exchange links the take itself: querying the take's ID returns the
+    // executed child order (its own orderId) with triggerOrderId = the take and
+    // our clientOrderId. Fills of exactly that child order are the take's fills.
+    let parentIsChild = false;
+    if (!linked.length && id(parent) !== binding.orderId &&
+        id(parent, ["triggerOrderId", "triggerOrderID"]) === binding.orderId &&
+        (binding.clientOrderId == null || parent.clientOrderId === binding.clientOrderId)) {
+      const childId = id(parent);
+      linked = fills.filter((f) => {
+        const trigger = [f.triggerOrderId, f.triggerOrderID].filter((v) => v != null && v !== "");
+        return id(f) === childId && trigger.every((v) => v === binding.orderId);
+      });
+      parentIsChild = linked.length > 0;
+    }
     if (!linked.length) return { verified: false };
     const childIds = new Set(linked.map((f) => id(f)));
     if (childIds.size !== 1) return { verified: false };
     const childOrderId = [...childIds][0];
     if (id(parent) !== binding.orderId && id(parent) !== childOrderId) return { verified: false };
-    const child = await api.queryOrder(binding.symbol, { orderId: childOrderId });
+    const child = parentIsChild ? parent
+      : await api.queryOrder(binding.symbol, { orderId: childOrderId });
     if (!child || id(child) !== childOrderId || child.status !== "FILLED" ||
         child.symbol !== nativeSymbol(binding.symbol) || child.side !== "SELL" ||
         child.positionSide !== "LONG" || !["MARKET", "TAKE_PROFIT_MARKET"].includes(child.type) ||
@@ -498,7 +514,11 @@ export function createNativeTakeManager({ api, store, proveFill, clock = Date.no
       const evidence = await proveFill(binding, nativeStopBindings(record.snapshot));
       if (!evidence?.verified || evidence.status !== "filled" ||
           !equal(evidence.fill?.quantity, binding.quantity) ||
-          !equal(evidence.residualPosition?.quantity, "0")) return;
+          !equal(evidence.residualPosition?.quantity, "0")) {
+        // Leave a trace: a filled take whose proof fails used to stay silent.
+        await report(intent.sourceSignalId, new Error("native_take_filled_fill_not_proven"));
+        return;
+      }
       for (const stop of nativeStopBindings(record.snapshot))
         await native.cancelWhenFlat(binding, stop);
       // Verify cleanup before committing an irreversible closed ledger row.

@@ -312,3 +312,34 @@ test("fill proof rejects incomplete quantity, wrong parent, duplicate trade, for
       [{ orderId: "301", quantity: "2", stopPrice: "92" }], now)).verified, false);
   }
 });
+
+test("NOT 2026-10-28: fills without triggerOrderId are linked through the queried take (child order + clientOrderId)", async () => {
+  const binding = { ...base(), orderId: "302" };
+  const fills = [{ tradeId: "640793875", orderId: "401", symbol: "BTC-USDT", side: "SELL",
+    positionSide: "LONG", qty: "2", price: "104.9", commission: "-0.02", commissionAsset: "VST",
+    filledTime: new Date(now - 5).toISOString() }];
+  const executed = { orderId: "401", triggerOrderId: "302", clientOrderId: "nt_test",
+    symbol: "BTC-USDT", status: "FILLED", type: "TAKE_PROFIT_MARKET", side: "SELL",
+    positionSide: "LONG", executedQty: "2", positionID: 0, price: "0" };
+  const api = {
+    queryOrder: async (_s, { orderId }) => (orderId === "302" ? executed : null),
+    getPositions: async () => [], getOpenOrders: async () => [],
+    queryFills: async () => fills,
+  };
+  const stops = [{ orderId: "301", quantity: "2", stopPrice: "92" }];
+  const ok = await proveNativeTakeFill(api, binding, stops, now);
+  assert.equal(ok.verified, true);
+  assert.equal(ok.childOrderId, "401");
+  assert.equal(Number(ok.fill.price), 104.9);
+  for (const mutate of [
+    () => { executed.clientOrderId = "nt_other"; },
+    () => { executed.triggerOrderId = "999"; },
+    () => { fills[0].orderId = "402"; },
+    () => { fills[0].qty = "1"; },
+  ]) {
+    const saved = structuredClone({ executed, fills });
+    mutate();
+    assert.equal((await proveNativeTakeFill(api, binding, stops, now)).verified, false);
+    Object.assign(executed, saved.executed); fills[0] = saved.fills[0];
+  }
+});
