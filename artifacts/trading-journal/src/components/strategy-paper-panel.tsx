@@ -1,32 +1,39 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/subscriber-api";
 
 type Stats = { trades: number; wins: number; winRatePct: number | null; avgTradePct: number | null; depositPct: number };
 type ExitId = "follow_cab" | "take5" | "take8" | "take10";
 type Paper = {
-  since: string | null; openTrades: number;
+  days: number | null; signalsFrom: string | null; signalsTo: string | null;
+  openTrades: number; otherPatternsExcluded: number;
   exits: Record<ExitId, Stats>;
   byPattern: Record<string, Record<ExitId, Stats>>;
   selection?: Record<ExitId, Stats>;
 };
 
-const EXITS: { id: ExitId; label: string }[] = [
-  { id: "follow_cab", label: "1. Как CAB" },
-  { id: "take5", label: "2. +5%" },
-  { id: "take8", label: "3. +8%" },
-  { id: "take10", label: "4. +10%" },
+const EXITS: { id: ExitId; name: string; short: string }[] = [
+  { id: "follow_cab", name: "1. Полностью как CAB", short: "Как CAB" },
+  { id: "take5", name: "2. Фиксация на +5%", short: "+5%" },
+  { id: "take8", name: "3. Фиксация на +8%", short: "+8%" },
+  { id: "take10", name: "4. Фиксация на +10%", short: "+10%" },
 ];
-const PATTERNS: Record<string, string> = {
-  stealth_breakout: "Stealth Breakout",
-  neon_support_bounce: "ABNeon Support",
-  impulse_buy: "Impulse Buy",
-  liquidation_cascade: "Liquidation Cascade",
-};
+const PATTERNS: [string, string][] = [
+  ["stealth_breakout", "Stealth Breakout"],
+  ["neon_support_bounce", "ABNeon Support"],
+  ["impulse_buy", "Impulse Buy"],
+  ["liquidation_cascade", "Liquidation Cascade"],
+];
+const PERIODS: { id: string; label: string }[] = [
+  { id: "7", label: "7 дней" }, { id: "30", label: "30 дней" }, { id: "all", label: "Всё время" },
+];
 
-const pct = (v: number | null | undefined, sign = true) =>
-  v === null || v === undefined ? "—" : `${sign && v > 0 ? "+" : ""}${v.toFixed(2)}%`;
+const pct = (v: number | null | undefined) =>
+  v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2).replace(".", ",")}%`;
 const tone = (v: number | null | undefined) =>
-  v === null || v === undefined || v === 0 ? "" : v > 0 ? "text-success" : "text-destructive";
+  v === null || v === undefined || v === 0 ? "text-foreground" : v > 0 ? "text-success" : "text-destructive";
+const day = (iso: string | null) =>
+  iso ? new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric" }) : "—";
 
 /**
  * Background PAPER of every strategy on every CAB signal: % to the deposit
@@ -34,80 +41,120 @@ const tone = (v: number | null | undefined) =>
  * owner's or the subscriber's route; `patterns` adds the "by patterns" sum.
  */
 export function StrategyPaperPanel({ endpoint, patterns = [] }: { endpoint: string; patterns?: string[] }) {
+  const [period, setPeriod] = useState("30");
+  const params = new URLSearchParams();
+  if (period !== "all") params.set("days", period);
+  if (patterns.length) params.set("patterns", patterns.join(","));
   const query = useQuery({
-    queryKey: ["strategy-paper", endpoint, patterns.join(",")],
-    queryFn: () => api<Paper>(`${endpoint}${patterns.length ? `?patterns=${patterns.join(",")}` : ""}`),
+    queryKey: ["strategy-paper", endpoint, period, patterns.join(",")],
+    queryFn: () => api<Paper>(`${endpoint}${params.toString() ? `?${params.toString()}` : ""}`),
     refetchInterval: 60_000,
   });
-  if (!query.data) {
-    return <p className="text-xs text-muted-foreground">{query.error ? "Paper-статистику загрузить не удалось" : "Загрузка paper-статистики…"}</p>;
-  }
   const d = query.data;
-  const patternIds = Object.keys(d.byPattern).filter((p) => PATTERNS[p]);
+  const closed = d ? d.exits.follow_cab.trades : 0;
   return (
-    <div className="space-y-3" data-testid="strategy-paper">
-      <div>
-        <p className="text-sm font-semibold">Paper по стратегиям — % к депозиту</p>
-        <p className="text-xs text-muted-foreground">
-          Каждый сигнал CAB в фоне «торгуется» всеми выходами, независимо от того, открыл ли его бот.
-          Сделка — 1% баланса маржи при 10x, без сложного процента, комиссия 0,1%.
-          {d.since ? ` С ${new Date(d.since).toLocaleDateString("ru-RU")}.` : " Данные начнут копиться после деплоя."}
-          {d.openTrades ? ` Открыто сейчас: ${d.openTrades}.` : ""}
-        </p>
+    <div className="space-y-4" data-testid="strategy-paper">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h3 className="text-base font-bold">Сколько заработала бы каждая стратегия</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Результат в % к депозиту, если бы бот торговал все сигналы CAB этой стратегией.
+          </p>
+        </div>
+        <div className="flex border border-border text-sm">
+          {PERIODS.map((p) => (
+            <button key={p.id} type="button" onClick={() => setPeriod(p.id)}
+              className={`px-3 py-1.5 ${period === p.id ? "bg-primary/15 font-semibold text-primary" : "text-muted-foreground"}`}>
+              {p.label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[480px] text-xs">
-          <thead><tr className="text-left text-muted-foreground">
-            <th className="py-1 pr-2 font-medium">Стратегия</th>
-            <th className="py-1 pr-2 font-medium">Сделок</th>
-            <th className="py-1 pr-2 font-medium">В плюс</th>
-            <th className="py-1 pr-2 font-medium">Средняя сделка</th>
-            <th className="py-1 font-medium">К депозиту</th>
-          </tr></thead>
-          <tbody>
+
+      {!d ? (
+        <p className="text-sm text-muted-foreground">{query.error ? "Не удалось загрузить" : "Загрузка…"}</p>
+      ) : (
+        <>
+          <p className="text-sm">
+            {closed
+              ? <>Сигналы с <b>{day(d.signalsFrom)}</b> по <b>{day(d.signalsTo)}</b> · закрыто сделок: <b>{closed}</b></>
+              : "За этот период закрытых сделок нет"}
+            {d.openTrades ? <> · ещё открыто: <b>{d.openTrades}</b></> : null}
+          </p>
+
+          <div className="grid gap-3 sm:grid-cols-2">
             {EXITS.map((e) => {
               const s = d.exits[e.id];
-              return <tr key={e.id} className="border-t border-border">
-                <td className="py-1.5 pr-2 font-semibold">{e.label}</td>
-                <td className="py-1.5 pr-2">{s.trades}</td>
-                <td className="py-1.5 pr-2">{s.winRatePct === null ? "—" : `${s.winRatePct}%`}</td>
-                <td className={`py-1.5 pr-2 ${tone(s.avgTradePct)}`}>{pct(s.avgTradePct)}</td>
-                <td className={`py-1.5 font-bold ${tone(s.depositPct)}`}>{pct(s.depositPct)}</td>
-              </tr>;
+              return (
+                <div key={e.id} className="border border-border bg-background/40 p-4">
+                  <p className="text-sm font-semibold">{e.name}</p>
+                  <p className={`mt-1 text-3xl font-bold tabular-nums ${tone(s.depositPct)}`}>{pct(s.depositPct)}</p>
+                  <p className="text-xs text-muted-foreground">к депозиту</p>
+                  <p className="mt-2 text-sm">
+                    {s.trades} сделок · в плюс {s.winRatePct === null ? "—" : `${String(s.winRatePct).replace(".", ",")}%`}
+                    {" · "}средняя сделка <span className={tone(s.avgTradePct)}>{pct(s.avgTradePct)}</span> цены
+                  </p>
+                </div>
+              );
             })}
-          </tbody>
-        </table>
-      </div>
-      {patternIds.length > 0 && (
-        <div className="overflow-x-auto">
-          <p className="mb-1 text-xs font-semibold">5. По паттернам — % к депозиту по каждому паттерну и выходу</p>
-          <table className="w-full min-w-[480px] text-xs">
-            <thead><tr className="text-left text-muted-foreground">
-              <th className="py-1 pr-2 font-medium">Паттерн</th>
-              {EXITS.map((e) => <th key={e.id} className="py-1 pr-2 font-medium">{e.label.replace(/^\d\. /, "")}</th>)}
-            </tr></thead>
-            <tbody>
-              {patternIds.map((p) => (
-                <tr key={p} className="border-t border-border">
-                  <td className="py-1.5 pr-2 font-semibold">{PATTERNS[p]} <span className="text-muted-foreground">({d.byPattern[p].follow_cab.trades})</span></td>
-                  {EXITS.map((e) => {
-                    const v = d.byPattern[p][e.id].depositPct;
-                    return <td key={e.id} className={`py-1.5 pr-2 ${tone(v)}`}>{pct(v)}</td>;
+          </div>
+
+          <div>
+            <h4 className="text-sm font-bold">5. По паттернам — % к депозиту</h4>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Стратегия 5 — сумма выбранных паттернов в нужном столбце.
+            </p>
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full min-w-[520px] text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left text-muted-foreground">
+                    <th className="py-2 pr-3 font-medium">Паттерн</th>
+                    <th className="py-2 pr-3 font-medium">Сделок</th>
+                    {EXITS.map((e) => <th key={e.id} className="py-2 pr-3 font-medium">{e.short}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {PATTERNS.map(([id, name]) => {
+                    const row = d.byPattern[id];
+                    return (
+                      <tr key={id} className="border-b border-border/60">
+                        <td className="py-2 pr-3 font-semibold">{name}</td>
+                        <td className="py-2 pr-3">{row?.follow_cab.trades ?? 0}</td>
+                        {EXITS.map((e) => {
+                          const v = row?.[e.id].trades ? row[e.id].depositPct : null;
+                          return <td key={e.id} className={`py-2 pr-3 font-semibold tabular-nums ${tone(v)}`}>{pct(v)}</td>;
+                        })}
+                      </tr>
+                    );
                   })}
-                </tr>
-              ))}
-              {d.selection && (
-                <tr className="border-t-2 border-primary/50">
-                  <td className="py-1.5 pr-2 font-bold">Выбранные паттерны</td>
-                  {EXITS.map((e) => {
-                    const v = d.selection![e.id].depositPct;
-                    return <td key={e.id} className={`py-1.5 pr-2 font-bold ${tone(v)}`}>{pct(v)}</td>;
-                  })}
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+                  {d.selection && (
+                    <tr className="bg-primary/5">
+                      <td className="py-2 pr-3 font-bold">Мои паттерны</td>
+                      <td className="py-2 pr-3">{d.selection.follow_cab.trades}</td>
+                      {EXITS.map((e) => {
+                        const v = d.selection![e.id].depositPct;
+                        return <td key={e.id} className={`py-2 pr-3 font-bold tabular-nums ${tone(v)}`}>{pct(v)}</td>;
+                      })}
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <details className="text-sm">
+            <summary className="cursor-pointer font-semibold">Как это считается</summary>
+            <ul className="mt-2 list-disc space-y-1 pl-5 text-muted-foreground">
+              <li>Берётся каждый закрытый сигнал CAB по 4 паттернам — как будто бот его открыл, даже если на самом деле не открыл.</li>
+              <li>Размер сделки: 1% депозита маржи при плече 10x. Значит, +1% цены = +0,1% к депозиту. Сделки просто складываются, без сложного процента.</li>
+              <li>«Как CAB» — вход и выход ровно по CAB.</li>
+              <li>«+5 / +8 / +10%» — если цена после входа дошла до цели, сделка фиксируется на цели; если нет — закрывается там же, где её закрыл CAB.</li>
+              <li>BTC при любой стратегии считается как CAB. Комиссия 0,1% на сделку.</li>
+              <li>Impulse Buy считается по итоговому выходу CAB, без деления на 80/20.</li>
+              {d.otherPatternsExcluded > 0 && <li>Старые паттерны не учитываются (сделок: {d.otherPatternsExcluded}).</li>}
+            </ul>
+          </details>
+        </>
       )}
     </div>
   );

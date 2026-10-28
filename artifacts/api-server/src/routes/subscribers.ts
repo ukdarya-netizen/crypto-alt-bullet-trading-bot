@@ -139,7 +139,7 @@ router.get("/me/strategy-paper", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req) }));
+  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req), days: daysQuery(req) }));
 });
 
 router.get("/me/performance", async (req, res) => {
@@ -333,13 +333,17 @@ router.get("/journal/trading-strategy", requireJournalSession, requireJournalOwn
 });
 
 // Background PAPER per strategy (% to the deposit), same for owner and subscribers.
+function daysQuery(req: Request): number | null {
+  const days = Number(req.query.days);
+  return [7, 30, 90].includes(days) ? days : null;
+}
 function patternsQuery(req: Request): string[] {
   const raw = typeof req.query.patterns === "string" ? req.query.patterns : "";
   return raw.split(",").map((p) => p.trim()).filter((p) => (TRADE_PATTERNS as string[]).includes(p)).slice(0, 3);
 }
 router.get("/journal/strategy-paper", requireJournalSession, requireJournalOwner, async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
-  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req) }));
+  res.json(await loadStrategyPaper(pool, { patterns: patternsQuery(req), days: daysQuery(req) }));
 });
 
 router.post("/journal/trading-strategy", requireJournalSession, requireJournalOwner, async (req, res) => {

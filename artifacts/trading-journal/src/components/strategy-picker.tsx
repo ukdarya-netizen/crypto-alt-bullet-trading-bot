@@ -55,7 +55,7 @@ export function StrategyPicker({ value, choices, disabled, pending, onSave }: {
                 <span className="font-bold">{index + 1}. {s.label}</span>
                 {saved && <span className="text-xs font-bold text-primary">выбрана</span>}
               </span>
-              <span className="mt-2 block text-xs text-muted-foreground">{STRATEGY_DESCRIPTIONS[s.id]}</span>
+              <span className="mt-2 block text-sm text-muted-foreground">{STRATEGY_DESCRIPTIONS[s.id]}</span>
             </button>
           );
         })}

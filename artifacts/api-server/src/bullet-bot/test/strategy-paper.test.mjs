@@ -35,3 +35,17 @@ test("summary: deposit % = price % x 10x x 1 %, open trades counted, pattern sel
   assert.equal(s.selection.follow_cab.depositPct, Math.round(depositPct(14.9) * 100) / 100);
   assert.equal(s.byPattern.liquidation_cascade.follow_cab.avgTradePct, -0.1);
 });
+
+test("only the 4 traded patterns count; others are reported; period by signal time", () => {
+  const rows = [
+    row({ peak_price: "100", exit_price: "102", signal_at: "2026-10-20T00:00:00Z" }),
+    row({ pattern_id: "price_led_momentum", peak_price: "100", exit_price: "90", signal_at: "2026-10-21T00:00:00Z" }),
+    row({ peak_price: "100", exit_price: "101", signal_at: "2026-09-01T00:00:00Z" }),
+  ];
+  const all = summarizeStrategyPaper(rows, { now: Date.parse("2026-10-28T00:00:00Z") });
+  assert.equal(all.exits.follow_cab.trades, 2);
+  assert.equal(all.otherPatternsExcluded, 1);
+  assert.equal(all.signalsFrom, "2026-09-01T00:00:00.000Z");
+  const week = summarizeStrategyPaper(rows, { days: 30, now: Date.parse("2026-10-28T00:00:00Z") });
+  assert.equal(week.exits.follow_cab.trades, 1);
+});

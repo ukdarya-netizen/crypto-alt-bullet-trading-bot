@@ -19,6 +19,11 @@ export const PAPER_FEE_PCT = 0.1;
 export const PAPER_LEVERAGE = 10;
 export const PAPER_ALLOCATION_PCT = 1;
 export const PAPER_EXITS = Object.freeze({ follow_cab: null, take5: 5, take8: 8, take10: 10 });
+// Only the 4 patterns the bot trades; retired patterns (PLM, BA, ...) that
+// are still in CAB's snapshot are counted separately and left out.
+export const PAPER_PATTERNS = Object.freeze([
+  "stealth_breakout", "neon_support_bounce", "impulse_buy", "liquidation_cascade",
+]);
 const CLOSED = new Set(["profit", "stop_loss", "bu_stop", "breakeven", "cancelled", "expired"]);
 const OPEN = new Set(["active", "in_run"]);
 
@@ -121,16 +126,23 @@ function finish(stats) {
  * Aggregates closed rows: per exit overall, and per pattern × exit (for the
  * "by patterns" strategy, whose result is the sum of the chosen patterns).
  */
-export function summarizeStrategyPaper(rows, { patterns = [] } = {}) {
+export function summarizeStrategyPaper(rows, { patterns = [], days = null, now = Date.now() } = {}) {
   const exits = Object.keys(PAPER_EXITS);
   const overall = Object.fromEntries(exits.map((e) => [e, emptyStats()]));
   const byPattern = {};
-  let open = 0, since = null;
+  const fromMs = Number.isFinite(days) && days > 0 ? now - days * 86_400_000 : null;
+  let open = 0, otherPatterns = 0, from = null, to = null;
   for (const row of rows) {
-    if (since === null || (row.first_seen_at && row.first_seen_at < since)) since = row.first_seen_at ?? since;
+    const pattern = row.pattern_id ?? "unknown";
+    const signalMs = row.signal_at ? new Date(row.signal_at).getTime() : null;
+    if (fromMs !== null && (signalMs === null || signalMs < fromMs)) continue;
+    if (!PAPER_PATTERNS.includes(pattern)) { if (row.closed_at) otherPatterns += 1; continue; }
     if (OPEN.has(row.source_status) && !row.closed_at) { open += 1; continue; }
     if (!row.closed_at) continue;
-    const pattern = row.pattern_id ?? "unknown";
+    if (signalMs !== null) {
+      if (from === null || signalMs < from) from = signalMs;
+      if (to === null || signalMs > to) to = signalMs;
+    }
     byPattern[pattern] ??= Object.fromEntries(exits.map((e) => [e, emptyStats()]));
     for (const exit of exits) {
       const pct = paperTradePct(row, exit);
@@ -140,7 +152,10 @@ export function summarizeStrategyPaper(rows, { patterns = [] } = {}) {
     }
   }
   const out = {
-    since: since ? new Date(since).toISOString() : null, openTrades: open,
+    days: fromMs === null ? null : days,
+    signalsFrom: from === null ? null : new Date(from).toISOString(),
+    signalsTo: to === null ? null : new Date(to).toISOString(),
+    openTrades: open, otherPatternsExcluded: otherPatterns,
     exits: Object.fromEntries(exits.map((e) => [e, finish(overall[e])])),
     byPattern: Object.fromEntries(Object.entries(byPattern).map(([p, s]) =>
       [p, Object.fromEntries(exits.map((e) => [e, finish(s[e])]))])),
@@ -162,7 +177,7 @@ export function summarizeStrategyPaper(rows, { patterns = [] } = {}) {
 export async function loadStrategyPaper(pool, options = {}) {
   await ensureStrategyPaperTable(pool);
   const { rows } = await pool.query(
-    `SELECT source_signal_id, symbol, pattern_id, entry_price, peak_price, exit_price,
+    `SELECT source_signal_id, symbol, pattern_id, signal_at, entry_price, peak_price, exit_price,
             source_status, closed_at, first_seen_at FROM strategy_paper_trades`);
   return summarizeStrategyPaper(rows, options);
 }
