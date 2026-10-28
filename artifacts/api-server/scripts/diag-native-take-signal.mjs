@@ -5,11 +5,26 @@
 //  - proveNativeTakeFill (parent order, positions, open orders, fills, result).
 // Usage (from artifacts/api-server, production DATABASE_URL + VST BingX secrets):
 //   node scripts/diag-native-take-signal.mjs cab-signal-19959 cab-signal-19949
-import { pool } from "@workspace/db";
+// Without shell access to the production DB: save the rows of the production
+// SELECT below to a JSON file and pass it (no DB connection is opened):
+//   node scripts/diag-native-take-signal.mjs --json rows.json
+//   SELECT json_agg(json_build_object('source_signal_id', p.source_signal_id,
+//     'intent', (SELECT row_to_json(i) FROM (SELECT phase, client_order_id, request, state,
+//        exchange_order_id, outcome, created_at::text, updated_at::text FROM vst_order_intents
+//        WHERE source_signal_id = p.source_signal_id AND phase LIKE 'native-full-take-%'
+//        ORDER BY id DESC LIMIT 1) i),
+//     'position', json_build_object('symbol', p.symbol, 'status', p.status,
+//        'snapshot', p.snapshot, 'updated_at', p.updated_at::text)))
+//   FROM vst_positions p WHERE p.source_signal_id IN ('cab-signal-19959', ...);
+import { readFileSync } from "node:fs";
 import { createBingXLiveApi } from "../src/bullet-bot/bingx-live-api.mjs";
 import { proveNativeTakeFill, nativeStopBindings } from "../src/bullet-bot/native-full-take.mjs";
 
-const ids = process.argv.slice(2);
+const jsonIdx = process.argv.indexOf("--json");
+const rowsFromFile = jsonIdx > 0
+  ? JSON.parse(readFileSync(process.argv[jsonIdx + 1], "utf8")) : null;
+const pool = rowsFromFile ? null : (await import("@workspace/db")).pool;
+const ids = rowsFromFile ? rowsFromFile.map((r) => r.source_signal_id) : process.argv.slice(2);
 if (!ids.length) {
   console.error("usage: node scripts/diag-native-take-signal.mjs <sourceSignalId> [...]");
   process.exit(2);
@@ -24,13 +39,14 @@ const step = async (label, fn) => {
 
 for (const sourceSignalId of ids) {
   console.log(`\n========== ${sourceSignalId}`);
-  const intent = (await pool.query(
+  const fileRow = rowsFromFile?.find((r) => r.source_signal_id === sourceSignalId);
+  const intent = fileRow ? fileRow.intent : (await pool.query(
     `SELECT phase, client_order_id, request, state, exchange_order_id, outcome,
             created_at::text, updated_at::text
        FROM vst_order_intents
       WHERE source_signal_id = $1 AND phase LIKE 'native-full-take-%'
       ORDER BY id DESC LIMIT 1`, [sourceSignalId])).rows[0];
-  const position = (await pool.query(
+  const position = fileRow ? fileRow.position : (await pool.query(
     `SELECT symbol, status, snapshot, updated_at::text
        FROM vst_positions WHERE source_signal_id = $1`, [sourceSignalId])).rows[0];
   show("intent (DB)", intent ?? null);
@@ -71,4 +87,4 @@ for (const sourceSignalId of ids) {
     String(f.orderId ?? f.orderID ?? "") === String(parent?.orderId ?? "")));
   await step("proveNativeTakeFill result", () => proveNativeTakeFill(api, binding, stops, now));
 }
-await pool.end();
+await pool?.end();
