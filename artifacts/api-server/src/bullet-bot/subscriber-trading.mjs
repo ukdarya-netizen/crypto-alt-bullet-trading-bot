@@ -22,6 +22,7 @@ import { decryptSecret, forbiddenPermissions, readBingXKeyPermissions } from "./
 import { VST_ENTRY_BATCH_LIMITS, VST_SIZING_LIMITS, VST_WRITE_PATHS } from "./server.mjs";
 import { normalizePositionProfile } from "./vst-position-profile.mjs";
 import { TRADING_STRATEGIES, resolveTradingStrategy } from "./trading-strategy.mjs";
+import { createVstTelegramNotifier } from "./vst-telegram.mjs";
 
 /** The subscriber's chosen size, leverage and margin mode (validated). */
 export function subscriberPositionProfile(row) {
@@ -47,6 +48,15 @@ const LEADER_LOCK_BASE = 100_000;
 const RECONCILE_MS = 15_000;
 const FEED_MS = 5_000;
 const TAKE_WATCH_MS = 3_000;
+const TELEGRAM_MS = 5_000;
+// Delivery lock ids of subscriber ledgers (the owner's ledger uses 1).
+const TELEGRAM_LOCK_BASE = 100_000;
+
+/** "Кабинет · <name or e-mail> · BingX VST · SYMBOL" — whose test account traded. */
+export function subscriberTelegramLabel(row) {
+  const who = String(row.name || row.email || `#${row.id}`).replace(/[^\p{L}\p{N}@#._\- ]/gu, "").trim().slice(0, 40);
+  return `Кабинет · ${who || `#${row.id}`}`;
+}
 
 // The subscribers table creates itself (same definition as
 // lib/db/src/schema/subscribers.ts), so no drizzle push is needed: a push
@@ -251,6 +261,23 @@ export function createSubscriberTradingManager({
     every(TAKE_WATCH_MS, async () => {
       if ((await worker.observeFullTakePrices()) > 0) runner.scheduler.wakeVst?.();
     });
+    // Owner 2026-10-28: every cabinet trade (open / close / not opened) goes to
+    // the owner's Telegram chat, the same messages as the main bot's, with
+    // the cabinet's name in front. Events older than an hour (before this
+    // feature or a long outage) are acknowledged silently, not replayed.
+    const token = configuration.TELEGRAM_BOT_TOKEN, chatId = configuration.TELEGRAM_CHAT_ID;
+    if (token && chatId) {
+      try {
+        await pool.query(
+          `UPDATE vst_events SET telegram_sent_at = now()
+           WHERE telegram_sent_at IS NULL AND created_at < now() - interval '1 hour'`);
+        const notifier = createVstTelegramNotifier({ pool, token, chatId,
+          label: subscriberTelegramLabel(sub), lockId: TELEGRAM_LOCK_BASE + id });
+        every(TELEGRAM_MS, () => notifier.tick());
+      } catch (error) {
+        log(`Subscriber ${id} Telegram notifications unavailable: ${error instanceof Error ? error.message : "error"}`);
+      }
+    }
     runners.set(id, runner);
     log(`Subscriber ${id} trading worker started (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
     await setRuntime(id, "started");

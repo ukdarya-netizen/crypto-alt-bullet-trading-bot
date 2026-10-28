@@ -296,3 +296,36 @@ test("a BingX rate-limit refusal is named in plain words", () => {
   } });
   assert.match(formatVstTradeOutcome(row), /Причина: BingX временно ограничил частые запросы/);
 });
+
+test("cabinet notifier prefixes its label and uses its own delivery lock", async () => {
+  const row = { ...event("vst_entry_verified"), id: "1", source_signal_id: "id-cab",
+    body: { symbol: "WOOUSDT" }, created_at: new Date() };
+  const acknowledged = new Set();
+  const messages = [];
+  const locks = [];
+  const pool = {
+    async connect() {
+      return {
+        async query(sql, params) {
+          if (sql.includes("pg_try_advisory_lock")) { locks.push(params[1]); return { rows: [{ acquired: true }] }; }
+          if (sql.includes("pg_advisory_unlock")) return { rows: [{ released: true }] };
+          if (sql.includes("FROM vst_events prior")) return { rows: [] };
+          if (sql.includes("FROM vst_events e")) return { rows: acknowledged.has("1") ? [] : [row] };
+          if (sql.includes("SET telegram_sent_at")) { acknowledged.add(params[0]); return { rows: [] }; }
+          throw new Error("unexpected SQL");
+        },
+        release() {},
+      };
+    },
+  };
+  const notifier = createVstTelegramNotifier({
+    pool, token: "123:TEST_TOKEN", chatId: "-123", label: "Кабинет · Дарья", lockId: 100_007,
+    fetcher: async (_url, options) => {
+      messages.push(JSON.parse(options.body).text);
+      return { ok: true, json: async () => ({ ok: true }) };
+    },
+  });
+  await notifier.tick();
+  assert.deepEqual(messages, ["Кабинет · Дарья · BingX VST · WOOUSDT\nПозиция открыта."]);
+  assert.deepEqual(locks, [100_007]);
+});

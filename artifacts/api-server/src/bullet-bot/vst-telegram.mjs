@@ -812,7 +812,13 @@ export function isUserFacingVstEvent(row) {
   return vstTradeOutcome(row) !== null;
 }
 
-export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch }) {
+/**
+ * `label` (subscriber cabinets) is put in front of every message, e.g.
+ * "Кабинет · Дарья · BingX VST · SOLUSDT", so the owner sees whose test
+ * account traded. `lockId` separates the delivery lock of each ledger.
+ */
+export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch, label = "",
+  lockId = LOCK_ID }) {
   if (!pool || typeof pool.connect !== "function") throw new Error("Telegram notifier needs a DB pool");
   validateTelegramCredentials(token, chatId);
   const retryAfterByEvent = new Map();
@@ -830,7 +836,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
       try {
         const lock = await client.query(
           "SELECT pg_try_advisory_lock($1, $2) AS acquired",
-          [LOCK_NAMESPACE, LOCK_ID],
+          [LOCK_NAMESPACE, lockId],
         );
         locked = lock.rows[0]?.acquired === true;
         if (!locked) return;
@@ -913,6 +919,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
               createdAt: row.created_at,
             });
             if (!message) throw new Error("Unrecognized VST Telegram event");
+            if (label) message = `${label} · ${message}`;
             await postTelegramMessage({ token, chatId, text: message, fetcher });
           } catch (error) {
             // This event remains unsent and may be retried after its cooldown;
@@ -947,7 +954,7 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
         if (locked) {
           try {
             const result = await client.query(
-              "SELECT pg_advisory_unlock($1, $2) AS released", [LOCK_NAMESPACE, LOCK_ID],
+              "SELECT pg_advisory_unlock($1, $2) AS released", [LOCK_NAMESPACE, lockId],
             );
             destroyClient = result.rows[0]?.released !== true;
           } catch {
