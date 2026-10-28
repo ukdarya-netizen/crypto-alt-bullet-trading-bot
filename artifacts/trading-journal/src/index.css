@@ -1,7 +1,15 @@
-@import url("https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&display=swap");
 
 @layer theme, base, clerk, components, utilities;
 @import 'tailwindcss';
+/* Brand fonts (self-hosted), same as the AltBullet scanner: Exo 2 + Space Mono. */
+@import "@fontsource/exo-2/400.css";
+@import "@fontsource/exo-2/500.css";
+@import "@fontsource/exo-2/600.css";
+@import "@fontsource/exo-2/700.css";
+@import "@fontsource/exo-2/800-italic.css";
+@import "@fontsource/exo-2/900-italic.css";
+@import "@fontsource/space-mono/400.css";
+@import "@fontsource/space-mono/700.css";
 @import '@clerk/themes/shadcn.css';
 @import 'tw-animate-css';
 @plugin "@tailwindcss/typography";
@@ -51,39 +59,43 @@
 }
 
 :root {
-  /* Crypto Alt Bullet palette (shared with the AltBullet scanner). */
-  --background: 230 27% 5%;
-  --foreground: 216 27% 92%;
-  --card: 231 23% 8%;
-  --card-foreground: 216 27% 92%;
-  --card-border: 235 18% 19%;
-  --popover: 231 23% 8%;
-  --popover-foreground: 216 27% 92%;
-  --popover-border: 235 18% 19%;
-  --primary: 189 77% 59%;
-  --primary-foreground: 230 35% 8%;
-  --secondary: 233 20% 15%;
-  --secondary-foreground: 216 27% 92%;
-  --muted: 232 18% 13%;
-  --muted-foreground: 220 12% 65%;
-  --accent: 269 72% 65%;
-  --accent-foreground: 230 35% 8%;
-  --destructive: 0 84% 63%;
+  /* Crypto Alts Bullet brand palette (same as the scanner): night-city navy,
+     neon violet, electric cyan and "BULLET" green. */
+  --background: 248 45% 4%;
+  --foreground: 220 40% 94%;
+  --card: 250 40% 7%;
+  --card-foreground: 220 40% 94%;
+  --card-border: 258 38% 20%;
+  --popover: 250 42% 8%;
+  --popover-foreground: 220 40% 94%;
+  --popover-border: 262 45% 26%;
+  --primary: 186 95% 56%;
+  --primary-foreground: 248 50% 6%;
+  --secondary: 258 32% 14%;
+  --secondary-foreground: 220 40% 94%;
+  --muted: 256 30% 12%;
+  --muted-foreground: 228 18% 66%;
+  --accent: 272 92% 68%;
+  --accent-foreground: 248 50% 6%;
+  --destructive: 352 95% 62%;
   --destructive-foreground: 0 0% 100%;
-  --success: 158 64% 52%;
-  --success-foreground: 230 35% 8%;
+  --success: 140 100% 55%;
+  --success-foreground: 248 50% 6%;
   --warning: 40 100% 55%;
-  --border: 235 18% 19%;
-  --input: 233 20% 18%;
-  --ring: 189 77% 59%;
-  --chart-1: 189 77% 59%;
-  --chart-2: 158 64% 52%;
+  --border: 258 38% 20%;
+  --input: 258 30% 17%;
+  --ring: 272 92% 68%;
+  --chart-1: 186 95% 56%;
+  --chart-2: 140 100% 55%;
   --chart-3: 40 100% 55%;
-  --chart-4: 269 72% 65%;
-  --chart-5: 0 84% 63%;
-  --app-font-sans: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --chart-4: 272 92% 68%;
+  --chart-5: 352 95% 62%;
+  --neon-violet: 272 92% 68%;
+  --neon-cyan: 186 95% 56%;
+  --neon-green: 140 100% 55%;
+  --app-font-sans: "Exo 2", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --app-font-mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  --radius: 0rem;
+  --radius: 0.375rem;
 }
 
 @layer base {
@@ -93,6 +105,40 @@
   body {
     @apply font-sans antialiased bg-background text-foreground;
     min-height: 100dvh;
+    font-variant-numeric: tabular-nums;
+    background-image:
+      radial-gradient(60rem 36rem at 0% -10%, hsl(272 92% 60% / 0.13), transparent 60%),
+      radial-gradient(50rem 30rem at 100% 110%, hsl(186 95% 50% / 0.10), transparent 60%),
+      linear-gradient(hsl(258 40% 30% / 0.07) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(258 40% 30% / 0.07) 1px, transparent 1px);
+    background-size: auto, auto, 32px 32px, 32px 32px;
+    background-attachment: fixed;
+  }
+}
+
+@layer components {
+  /* Logo-style text, shared with the scanner. */
+  .brand-title {
+    font-family: var(--app-font-sans);
+    font-style: italic;
+    font-weight: 900;
+    letter-spacing: 0.02em;
+    background: linear-gradient(180deg, #f2f7ff 0%, #a9c8ff 45%, #5b8cff 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    filter: drop-shadow(0 0 6px hsl(222 100% 70% / 0.35));
+  }
+  .brand-bullet {
+    font-family: var(--app-font-sans);
+    font-style: italic;
+    font-weight: 900;
+    letter-spacing: 0.03em;
+    color: hsl(var(--neon-green));
+    text-shadow: 0 0 6px hsl(var(--neon-green) / 0.55), 0 0 18px hsl(var(--neon-green) / 0.25);
+  }
+  .neon-edge {
+    border-image: linear-gradient(90deg, hsl(var(--neon-violet)), hsl(var(--neon-cyan))) 1;
   }
 }
 
@@ -129,7 +175,7 @@
     background-size: 48px 48px, 48px 48px, auto;
   }
   .cyber-landing-header {
-    background: rgba(7, 12, 21, .76);
+    background: hsl(250 45% 5% / .78);
     backdrop-filter: blur(14px);
   }
   .cyber-landing-mark {
@@ -175,7 +221,7 @@
     min-height: 340px;
     padding: 20px;
     overflow: hidden;
-    background: linear-gradient(145deg, hsl(218 34% 11% / .92), hsl(225 31% 6% / .96));
+    background: linear-gradient(145deg, hsl(258 40% 11% / .92), hsl(250 45% 6% / .96));
     border: 1px solid hsl(var(--primary) / .27);
     box-shadow: inset 0 0 50px hsl(var(--primary) / .035), 0 24px 70px rgba(0, 0, 0, .28);
   }
@@ -204,17 +250,20 @@
   }
   /* App shell in the AltBullet scanner style: flat cards, thin borders,
      cyan active states, violet brand gradient only in the brand bar. */
-  .cyber-shell { background: hsl(var(--background)); }
-  .cyber-shell .cyber-sidebar { background: hsl(var(--card)); border-color: hsl(var(--border)); }
+  .cyber-shell { background: transparent; }
+  .cyber-shell .cyber-sidebar { background: hsl(252 45% 5% / .9); backdrop-filter: blur(8px); border-color: hsl(var(--border)); }
   .cyber-shell .cyber-brand {
-    border-color: hsl(var(--border));
-    background: linear-gradient(110deg, rgba(85, 64, 154, .10), transparent 70%);
+    border-bottom: 1px solid;
+    border-image: linear-gradient(90deg, hsl(var(--neon-violet)), hsl(var(--neon-cyan))) 1;
+    background: linear-gradient(110deg, hsl(var(--neon-violet) / .16), hsl(var(--neon-cyan) / .05) 55%, transparent 80%);
   }
   .cyber-shell .cyber-nav-link { position: relative; border: 1px solid transparent; }
+  .cyber-shell .cyber-nav-link { border-radius: var(--radius); }
   .cyber-shell .cyber-nav-link[data-active="true"] {
-    color: hsl(var(--primary));
-    background: hsl(var(--primary) / .10);
-    border-color: hsl(var(--primary) / .20);
+    color: hsl(var(--foreground));
+    background: linear-gradient(100deg, hsl(var(--neon-violet) / .20), hsl(var(--neon-cyan) / .08));
+    border-color: hsl(var(--neon-violet) / .45);
+    box-shadow: 0 0 12px hsl(var(--neon-violet) / .25);
   }
   button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible,
   summary:focus-visible {
