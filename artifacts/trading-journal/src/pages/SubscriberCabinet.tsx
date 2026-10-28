@@ -255,8 +255,12 @@ function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
           className={`h-11 px-3 text-sm font-bold disabled:cursor-not-allowed ${!real ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
           Демо VST
         </button>
-        <button type="button" disabled={sub.tradingEnabled || change.isPending || real || !sub.realAllowed || !confirm}
-          onClick={() => change.mutate("real")} aria-pressed={real}
+        <button type="button" disabled={sub.tradingEnabled || change.isPending || real}
+          onClick={() => {
+            if (!sub.realAllowed) { setError("Реальный счёт открывает владелец"); return; }
+            if (!confirm) { setError("Сначала поставьте галочку ниже: торговля на реальные деньги"); return; }
+            change.mutate("real");
+          }} aria-pressed={real}
           className={`h-11 px-3 text-sm font-bold disabled:cursor-not-allowed ${real ? "bg-destructive text-destructive-foreground" : "text-muted-foreground hover:bg-muted"}`}>
           Реальный счёт
         </button>
@@ -272,7 +276,7 @@ function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
       ) : (
         <p className="mt-3 text-xs text-muted-foreground">Реальный счёт открывает владелец.</p>
       )}
-      {sub.tradingEnabled && <p className="mt-2 text-xs text-muted-foreground">Счёт можно сменить после «Стоп» и закрытия открытых сделок.</p>}
+      {sub.tradingEnabled && <p className="mt-2 text-sm text-amber-300">Торговля запущена — счёт меняется только после «Стоп» (шаг 5) и закрытия открытых сделок.</p>}
       {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
     </Step>
   );
