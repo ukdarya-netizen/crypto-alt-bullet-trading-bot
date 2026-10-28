@@ -56,11 +56,24 @@ export async function readBingXKeyPermissions({ key, secret }, { fetchImpl = fet
     `https://open-api.bingx.com/openApi/v1/account/apiPermissions?${query}&signature=${signature}`,
     { method: "GET", headers: { "X-BX-APIKEY": key }, signal: AbortSignal.timeout(10_000) },
   );
-  const body = await response.json().catch(() => null);
-  if (!response.ok || Number(body?.code) !== 0) {
-    throw new Error(`проверка прав ключа: ${body?.msg ?? `HTTP ${response.status}`}`);
+  const text = await response.text().catch(() => "");
+  let body = null;
+  try { body = JSON.parse(text); } catch {}
+  // Some BingX account endpoints answer without the {code, data} wrapper.
+  const data = body && typeof body === "object" && "data" in body ? body.data : body;
+  const raw = Array.isArray(data) ? data
+    : data?.permissions ?? data?.permission ?? data?.apiPermissions ?? null;
+  const failed = !response.ok || (body && body.code !== undefined && Number(body.code) !== 0);
+  if (failed || raw === null) {
+    // Diagnosable without exposing anything: code, message, response field
+    // names; long letter/digit runs (an API key) are masked.
+    const mask = (value) => String(value).replace(/[A-Za-z0-9]{16,}/g, "***").slice(0, 160);
+    const detail = body && typeof body === "object"
+      ? `code ${mask(body.code ?? "—")}${body.msg ? `, ${mask(body.msg)}` : ""}, поля: ${Object.keys(body).join(",")}` +
+        (data && typeof data === "object" && data !== body ? `, data: ${Object.keys(data).join(",")}` : "")
+      : `ответ не JSON: ${mask(text) || "пусто"}`;
+    throw new Error(`проверка прав ключа: HTTP ${response.status}, ${detail}`);
   }
-  const raw = body?.data?.permissions ?? body?.data?.permission ?? null;
   const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : null;
   if (!list) throw new Error("проверка прав ключа: BingX не вернул список прав");
   return { permissions: list.map((value) => Number(String(value).trim())).filter(Number.isFinite), raw };
