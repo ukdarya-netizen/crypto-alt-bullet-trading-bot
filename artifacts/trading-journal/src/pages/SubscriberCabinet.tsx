@@ -300,7 +300,13 @@ function Results() {
   );
 }
 
-export default function SubscriberCabinet() {
+/**
+ * The cabinet itself (key, strategy, size, start/stop, results). `embedded`
+ * renders it inside the owner's journal ("Мой кабинет") without the
+ * subscriber page shell; the owner is approved automatically by the API.
+ */
+export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean }) {
+  const Wrap = embedded ? EmbeddedShell : Shell;
   const queryClient = useQueryClient();
   const query = useQuery({
     queryKey: ["me-subscription"],
@@ -308,32 +314,48 @@ export default function SubscriberCabinet() {
     refetchInterval: 15_000,
   });
   const refresh = () => void queryClient.invalidateQueries({ queryKey: ["me-subscription"] });
-  if (query.isLoading) return <Shell><div className="h-48 animate-pulse border border-border bg-card" /></Shell>;
+  if (query.isLoading) return <Wrap><div className="h-48 animate-pulse border border-border bg-card" /></Wrap>;
   if (query.error || !query.data) {
-    return <Shell><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />} title="Не удалось загрузить" text="Обновите страницу чуть позже." /></Shell>;
+    return <Wrap><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />} title="Не удалось загрузить" text="Обновите страницу чуть позже." /></Wrap>;
   }
   const { subscription: sub, strategyChoices, keysConfigured, positionChoices } = query.data;
   if (sub.status === "pending") {
-    return <Shell><Notice icon={<Clock className="h-10 w-10 text-primary" />} title="Заявка отправлена"
-      text="Владелец получит её и одобрит. Эта страница обновится сама, ничего нажимать не нужно." /></Shell>;
+    return <Wrap><Notice icon={<Clock className="h-10 w-10 text-primary" />} title="Заявка отправлена"
+      text="Владелец получит её и одобрит. Эта страница обновится сама, ничего нажимать не нужно." /></Wrap>;
   }
   if (sub.status === "rejected" || sub.status === "blocked") {
-    return <Shell><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />}
+    return <Wrap><Notice icon={<ShieldX className="h-10 w-10 text-destructive" />}
       title={sub.status === "rejected" ? "Заявка отклонена" : "Доступ приостановлен"}
-      text="Если это ошибка — напишите владельцу." /></Shell>;
+      text="Если это ошибка — напишите владельцу." /></Wrap>;
   }
   return (
-    <Shell>
-      <div className="flex items-center gap-3">
-        <Target className="h-5 w-5 text-primary" />
-        <h1 className="text-xl font-bold">Мой торговый бот</h1>
-      </div>
+    <Wrap>
+      {embedded ? (
+        <p className="border border-primary/30 bg-primary/5 p-4 text-sm">
+          Это та же страница, что видят подписчики. Здесь отдельный бот на отдельном ключе BingX:
+          он не связан с основным ботом (VST · бот) и его стратегией. Ключ основного бота сюда не подойдёт —
+          два бота на одном счёте мешали бы друг другу. Нужен ключ другого аккаунта BingX.
+        </p>
+      ) : (
+        <div className="flex items-center gap-3">
+          <Target className="h-5 w-5 text-primary" />
+          <h1 className="text-xl font-bold">Мой торговый бот</h1>
+        </div>
+      )}
       <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
       <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={JSON.stringify(sub.positionSettings)} sub={sub} choices={positionChoices} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
       <Results />
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>
-    </Shell>
+    </Wrap>
   );
+}
+
+function EmbeddedShell({ children }: { children: ReactNode }) {
+  return <div className="mx-auto max-w-3xl space-y-4 pb-16">{children}</div>;
+}
+
+export default function SubscriberCabinet() {
+  return <SubscriberCabinetBody />;
 }

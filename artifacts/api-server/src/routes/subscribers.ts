@@ -63,7 +63,24 @@ function publicView(row: Row) {
   };
 }
 
+/** The owner uses the same cabinet as a subscriber ("Мой кабинет"), approved at once. */
+const isOwner = (userId: string | null | undefined) =>
+  Boolean(userId) && userId === process.env.JOURNAL_OWNER_USER_ID;
+
 async function subscriberFor(req: Request): Promise<Row> {
+  const row = await findOrCreateSubscriber(req);
+  const userId = getAuth(req).userId;
+  if (isOwner(userId) && row.status !== "approved") {
+    const approved = await pool.query(
+      `UPDATE subscribers SET status = 'approved', decided_at = now(), decided_by = $2,
+         version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
+      [row.id, userId]);
+    return approved.rows[0] as Row;
+  }
+  return row;
+}
+
+async function findOrCreateSubscriber(req: Request): Promise<Row> {
   const userId = getAuth(req).userId!;
   const existing = await pool.query("SELECT * FROM subscribers WHERE clerk_user_id = $1", [userId]);
   if (existing.rows[0]) return existing.rows[0] as Row;
@@ -159,6 +176,12 @@ router.post("/me/api-key", async (req, res) => {
   const apiSecret = String(req.body?.apiSecret ?? "").trim();
   if (!plausibleBingXKey(apiKey) || !plausibleBingXKey(apiSecret)) {
     return refuse(res, 422, "key_format", "Ключ и секрет — это латинские буквы и цифры из BingX");
+  }
+  // The owner's main bot already trades the account of BINGX_API_KEY; a second
+  // bot on the same account would open duplicate positions and fight over them.
+  if (process.env.BINGX_API_KEY && apiKey === process.env.BINGX_API_KEY.trim()) {
+    return refuse(res, 409, "same_as_owner_bot",
+      "Этим ключом уже торгует основной бот владельца. Нужен ключ другого аккаунта BingX (например, субаккаунта).");
   }
   // 1) The key must not be able to move money (withdraw / transfers).
   let permissions: number[];

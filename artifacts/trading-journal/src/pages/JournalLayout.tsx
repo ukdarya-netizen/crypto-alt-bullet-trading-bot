@@ -1,10 +1,10 @@
 import { Switch, Route, Link, useLocation } from "wouter";
 import { useAuth, useClerk, useUser } from "@clerk/react";
-import { LogOut, LayoutDashboard, List, History, ShieldAlert, Terminal, Wallet, Target, Database, Activity, FlaskConical, Users } from "lucide-react";
+import { LogOut, LayoutDashboard, List, History, ShieldAlert, Terminal, Wallet, Target, Database, Activity, FlaskConical, Users, UserRound } from "lucide-react";
 import { BrandLockup, BrandMark } from "@/components/brand";
 import JournalOverview from "./JournalOverview";
 import JournalSubscribers from "./JournalSubscribers";
-import SubscriberCabinet from "./SubscriberCabinet";
+import SubscriberCabinet, { SubscriberCabinetBody } from "./SubscriberCabinet";
 import { useGetJournalAccess, getGetJournalAccessQueryKey } from "@workspace/api-client-react";
 import JournalOpen from "./JournalOpen";
 import JournalHistory from "./JournalHistory";
@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { href: "/journal/history", label: "История", short: "История", sub: "все сделки", icon: History },
   { href: "/journal/health", label: "Bot Health", short: "Health", sub: "состояние бота", icon: Activity },
   { href: "/journal/subscribers", label: "Подписчики", short: "Подписчики", sub: "заявки и доступ", icon: Users },
+  { href: "/journal/my-bot", label: "Мой кабинет", short: "Кабинет", sub: "запуск как у подписчика", icon: UserRound },
 ] as const;
 
 export default function JournalLayout() {
@@ -174,6 +175,7 @@ export default function JournalLayout() {
             <Route path="/journal/history" component={JournalHistory} />
             <Route path="/journal/health" component={JournalHealth} />
             <Route path="/journal/subscribers" component={JournalSubscribers} />
+            <Route path="/journal/my-bot">{() => <SubscriberCabinetBody embedded />}</Route>
             <Route path="/journal/vst-review" component={JournalVstReview} />
             <Route path="/journal/trades/:id" component={JournalTradeDetail} />
           </Switch>
