@@ -21,7 +21,7 @@ export * from "./schema";
  * subscriber's own tables.
  */
 export function createSubscriberSchemaPool(schemaName: string, max = 4): pg.Pool {
-  if (!/^sub_[0-9]{1,9}$/.test(schemaName)) throw new Error("invalid subscriber schema name");
+  if (!/^subr?_[0-9]{1,9}$/.test(schemaName)) throw new Error("invalid subscriber schema name");
   return new Pool({
     connectionString: process.env.DATABASE_URL,
     max,

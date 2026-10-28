@@ -26,7 +26,8 @@ import { createIndependentWorkerTickScheduler } from "./worker-tick-scheduler.mj
 import { decryptSecret, forbiddenPermissions, readBingXKeyPermissions } from "./subscriber-keys.mjs";
 import { VST_ENTRY_BATCH_LIMITS, VST_SIZING_LIMITS, VST_WRITE_PATHS } from "./server.mjs";
 import { normalizePositionProfile } from "./vst-position-profile.mjs";
-import { TRADING_STRATEGIES, resolveTradingStrategy } from "./trading-strategy.mjs";
+import { TRADING_STRATEGIES, describeTradingStrategy, resolveTradingStrategy } from "./trading-strategy.mjs";
+import { postTelegramMessage, redactTelegramError, validateTelegramCredentials } from "./telegram-client.mjs";
 import { createVstTelegramNotifier } from "./vst-telegram.mjs";
 
 /** The subscriber's chosen size, leverage and margin mode (validated). */
@@ -113,6 +114,8 @@ const SUBSCRIBERS_UPGRADES = [
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS real_allowed boolean DEFAULT false NOT NULL",
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS real_key_verified_at timestamp with time zone",
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS key_is_owner_main boolean DEFAULT false NOT NULL",
+  // Last trading state announced in Telegram ("real:on", "vst:off", ...).
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS trading_notice text",
 ];
 const ensuredPools = new WeakMap();
 
@@ -170,6 +173,7 @@ export function createSubscriberTradingManager({
   log = (line) => process.stdout.write(`${line}\n`),
   configuration = process.env,
   clock = Date.now,
+  fetchImpl = globalThis.fetch,
 }) {
   const runners = new Map(); // id -> runner
   let reconcileTimer = null;
@@ -191,6 +195,40 @@ export function createSubscriberTradingManager({
    * restart): it never opens new trades and does not report the cabinet
    * status, but keeps stops, takes and CAB closes until the account is flat.
    */
+  // Owner 2026-10-28: the owner's Telegram chat is told when a cabinet's
+  // trading really starts / stops / fails, and on which account. Each state
+  // is announced once (stored), so restarts and deploys do not repeat it.
+  const announced = new Map(); // id -> state
+  async function announce(sub, account, state, lines) {
+    const key = `${account}:${state}`;
+    if ((announced.get(sub.id) ?? sub.trading_notice) === key) return;
+    announced.set(sub.id, key);
+    try {
+      await ownerPool.query("UPDATE subscribers SET trading_notice = $2 WHERE id = $1", [sub.id, key]);
+    } catch {}
+    const token = configuration.TELEGRAM_BOT_TOKEN, chatId = configuration.TELEGRAM_CHAT_ID;
+    if (!token || !chatId) return;
+    const head = `${subscriberTelegramLabel(sub)}\nBingX ${account === "real" ? "REAL" : "VST"} · `;
+    try {
+      validateTelegramCredentials(token, chatId);
+      await postTelegramMessage({ token, chatId, text: head + lines.join("\n"), fetcher: fetchImpl });
+    } catch (error) {
+      log(`Subscriber ${sub.id} trading notice failed: ${redactTelegramError(error)}`);
+    }
+  }
+  function startedLines(sub, account) {
+    let profile = null;
+    try { profile = subscriberPositionProfile(sub); } catch {}
+    const unit = account === "real" ? "USDT" : "VST";
+    const strategy = subscriberTradingStrategy(sub);
+    return [
+      account === "real" ? "Торговля на РЕАЛЬНОМ счёте запущена." : "Торговля на демо-счёте запущена.",
+      `Стратегия: ${strategy ? describeTradingStrategy(strategy) : "—"}`,
+      profile ? `Размер: ${profile.allocation.mode === "percent" ? `${profile.allocation.value}% от баланса`
+        : `${profile.allocation.value} ${unit}`} · ${profile.marginMode === "CROSSED" ? "кросс" : "изолированная"} · ${profile.leverage}x` : null,
+    ].filter(Boolean);
+  }
+
   async function startRunner(sub, account = subscriberAccount(sub), { draining = false } = {}) {
     const id = sub.id;
     const key = runnerKey(id, account);
@@ -316,6 +354,7 @@ export function createSubscriberTradingManager({
     runners.set(key, runner);
     log(`Subscriber ${id} ${draining ? "DRAINING (open positions only) " : ""}trading worker started on ${account.toUpperCase()} (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
     await report("started");
+    if (!draining && runner.tradingEnabled) await announce(sub, account, "on", startedLines(sub, account));
     return runner;
   }
 
@@ -367,6 +406,10 @@ export function createSubscriberTradingManager({
         }
         if (runner.account !== subscriberAccount(sub) || runner.draining) {
           // The other account (or a drain): no new trades; stop once flat.
+          if (runner.tradingEnabled) {
+            await announce(sub, runner.account, "off", [
+              "Торговля остановлена: выбран другой счёт. Открытые сделки здесь бот доведёт до закрытия."]);
+          }
           runner.tradingEnabled = false;
           if (runner.account === subscriberAccount(sub) && sub.trading_enabled) {
             await stopRunner(key, "trading_restarted"); // a full runner starts below
@@ -383,6 +426,11 @@ export function createSubscriberTradingManager({
         if (!runner.tradingEnabled && sub.trading_enabled) {
           // Restarted after "Стоп": never trade signals that arrived while stopped.
           runner.feedCursor = new Date(sub.trading_started_at ?? clock());
+          await announce(sub, runner.account, "on", startedLines(sub, runner.account));
+        }
+        if (runner.tradingEnabled && !sub.trading_enabled) {
+          await announce(sub, runner.account, "off", [
+            "Торговля остановлена. Новые сделки не открываются; открытые бот доведёт до закрытия."]);
         }
         runner.tradingEnabled = Boolean(sub.trading_enabled);
         if (!runner.tradingEnabled && (await openPositionCount(runner)) === 0) {
@@ -405,7 +453,11 @@ export function createSubscriberTradingManager({
           } catch (error) {
             const reason = error instanceof Error ? error.message : "start_failed";
             log(`Subscriber ${sub.id} ${account.toUpperCase()} trading worker could not start: ${reason}`);
-            if (trade) await setRuntime(sub.id, "error", reason);
+            if (trade) {
+              await setRuntime(sub.id, "error", reason);
+              await announce(sub, account, `error:${reason.slice(0, 60)}`,
+                ["Торговля НЕ запустилась.", `Причина: ${reason.slice(0, 200)}`]);
+            }
           }
         }
       }

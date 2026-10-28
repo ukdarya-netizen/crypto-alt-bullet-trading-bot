@@ -60,8 +60,13 @@ test("account switch keeps managing the old account until flat; restart drains a
     real_key_verified_at: new Date(), version: 1, leverage: 10, margin_mode: "ISOLATED",
     allocation_mode: "amount", allocation_value: 10 } };
   const logs = [];
-  const manager = createSubscriberTradingManager({ ownerPool: ownerPool(sub), log: (l) => logs.push(l),
-    configuration: { BULLET_VST_STOP_BUFFER_RATE: "0.003" } });
+  const sent = [];
+  const fetchImpl = async (_url, options) => {
+    sent.push(JSON.parse(options.body).text);
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const manager = createSubscriberTradingManager({ ownerPool: ownerPool(sub), log: (l) => logs.push(l), fetchImpl,
+    configuration: { BULLET_VST_STOP_BUFFER_RATE: "0.003", TELEGRAM_BOT_TOKEN: "1:abc", TELEGRAM_CHAT_ID: "-5" } });
   await manager.reconcileNow();
   assert.ok(logs.some((l) => /Subscriber 7 trading worker started on VST/.test(l)), logs.join("\n"));
   // VST has an open trade; user presses Стоп and switches to REAL, then Старт.
@@ -76,6 +81,15 @@ test("account switch keeps managing the old account until flat; restart drains a
   await manager.reconcileNow();
   assert.ok(logs.some((l) => /VST trading worker stopped \(account_flat\)/.test(l)), logs.join("\n"));
   assert.ok(!logs.some((l) => /REAL trading worker stopped/.test(l)));
+  assert.deepEqual(sent.map((t) => t.split("\n").slice(0, 2).join(" | ")), [
+    "Кабинет · #7 | BingX VST · Торговля на демо-счёте запущена.",
+    "Кабинет · #7 | BingX VST · Торговля остановлена: выбран другой счёт. Открытые сделки здесь бот доведёт до закрытия.",
+    "Кабинет · #7 | BingX REAL · Торговля на РЕАЛЬНОМ счёте запущена.",
+  ]);
+  assert.match(sent[2], /Размер: 10 USDT · изолированная · 10x/);
+  // Another reconcile (or a restart with the stored state) does not repeat it.
+  await manager.reconcileNow();
+  assert.equal(sent.length, 3);
   await manager.stop();
 
   // Restart with trading stopped but an open REAL trade: a draining worker manages it.
