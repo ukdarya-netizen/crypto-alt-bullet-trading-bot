@@ -13,6 +13,10 @@ export type Subscription = {
   apiKeyVerifiedAt: string | null;
   apiKeyError: string | null;
   positionSettings: PositionSettings;
+  tradingAccount: "vst" | "real";
+  realAllowed: boolean;
+  realKeyVerifiedAt: string | null;
+  keyIsOwnerMain: boolean;
   tradingEnabled: boolean;
   tradingStartedAt: string | null;
   runtimeStatus: string | null;
@@ -33,8 +37,9 @@ export type PositionChoices = {
 };
 
 /** "1% от баланса · изолированная · 10x" */
-export function positionSettingsText(s: PositionSettings): string {
-  const size = s.allocationMode === "percent" ? `${s.allocationValue}% от баланса` : `${s.allocationValue} VST`;
+export function positionSettingsText(s: PositionSettings, account: "vst" | "real" = "vst"): string {
+  const size = s.allocationMode === "percent" ? `${s.allocationValue}% от баланса`
+    : `${s.allocationValue} ${account === "real" ? "USDT" : "VST"}`;
   return `${size} · ${s.marginMode === "CROSSED" ? "кросс" : "изолированная"} · ${s.leverage}x`;
 }
 

@@ -23,6 +23,54 @@ const ORIGINS = Object.freeze({
   vst: "https://open-api-vst.bingx.com",
 });
 const TIMEOUT_MS = 10_000;
+
+// REAL account (owner 2026-10-28): the same managed executor that trades the
+// VST demo, pointed at the real BingX account. Only an explicit capability
+// object (never a string or env flag) switches the host; all VST management
+// rules stay as they are. BingX names the margin asset "VST" on the demo and
+// "USDT" on the real account, so the exchange boundary translates exactly
+// those fields and nothing else (contract currency, income/PnL asset stay
+// as BingX returns them).
+export const REAL_ACCOUNT_CAPABILITY = Object.freeze({ realAccount: "bingx-usdt-perpetual" });
+const REAL_ASSET_KEYS = new Set(["commissionAsset", "feeAsset"]);
+const REAL_ASSET_PATHS = new Set([
+  "/openApi/swap/v2/trade/allFillOrders",
+  "/openApi/swap/v2/trade/fillHistory",
+  "/openApi/swap/v2/trade/order",
+  "/openApi/swap/v2/trade/allOrders",
+  "/openApi/swap/v2/trade/openOrders",
+]);
+/** Outgoing params on the real account: currency "VST" means the margin asset. */
+export function realAccountParams(params) {
+  if (!params || params.currency !== "VST") return params;
+  return { ...params, currency: "USDT" };
+}
+/**
+ * Incoming data on the real account, as the demo-account executor reads it:
+ * balance rows' `asset` and fills/orders' commission asset "USDT" -> "VST".
+ */
+export function realAccountData(path, data) {
+  if (path === "/openApi/swap/v3/user/balance") {
+    const fix = (row) => (row && typeof row === "object" && !Array.isArray(row) && row.asset === "USDT"
+      ? { ...row, asset: "VST" } : row);
+    if (Array.isArray(data)) return data.map(fix);
+    if (data && typeof data === "object" && "balance" in data) {
+      return { ...data, balance: Array.isArray(data.balance) ? data.balance.map(fix) : fix(data.balance) };
+    }
+    return fix(data);
+  }
+  if (!REAL_ASSET_PATHS.has(path)) return data;
+  const walk = (value, depth) => {
+    if (depth > 6 || value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map((item) => walk(item, depth + 1));
+    const out = {};
+    for (const [key, item] of Object.entries(value)) {
+      out[key] = REAL_ASSET_KEYS.has(key) && item === "USDT" ? "VST" : walk(item, depth + 1);
+    }
+    return out;
+  };
+  return walk(data, 0);
+}
 const MAINNET_REQUEST_GAP_MS = 600;
 // Keep a small margin above the required one-second interval for the final
 // timestamp/signature computation between a reservation and transport start.
@@ -575,9 +623,18 @@ export function createBingXLiveApi({
   // Leverage, margin mode and per-trade allocation of the VST automated LONG
   // path. The owner's bot uses the default (isolated 10x, 1% of balance).
   positionProfile = OWNER_POSITION_PROFILE,
+  // REAL_ACCOUNT_CAPABILITY only (see above); anything else keeps the demo host.
+  account,
 } = {}) {
   if (!Object.hasOwn(ORIGINS, environment)) {
     throw new TypeError('environment must be "mainnet" or "vst"');
+  }
+  if (account !== undefined && account !== REAL_ACCOUNT_CAPABILITY) {
+    throw new TypeError("account must be REAL_ACCOUNT_CAPABILITY");
+  }
+  const realAccount = account === REAL_ACCOUNT_CAPABILITY;
+  if (realAccount && environment !== "vst") {
+    throw new TypeError("the real account uses the managed (vst) executor semantics");
   }
   const PROFILE = normalizePositionProfile(positionProfile);
   const PROFILE_LEVERAGE = PROFILE.leverage;
@@ -634,7 +691,10 @@ export function createBingXLiveApi({
   const hasInjectedTransportOrClock = fetchImpl !== globalThis.fetch ||
     clock !== Date.now || sleep !== defaultSleep;
   const outboundPacer = requestPacer ?? (environment === "vst"
-    ? (hasInjectedTransportOrClock
+    ? (realAccount
+      // Own budget: the real account never shares the demo accounts' queue.
+      ? createVstEndpointPacer()
+      : hasInjectedTransportOrClock
       ? createBingXOutboundPacer({ gapMs: VST_REQUEST_GAP_MS, clock, sleep })
       : defaultVstOutboundPacer)
     : createBingXOutboundPacer({
@@ -658,7 +718,7 @@ export function createBingXLiveApi({
   const submittedAutomatedFlatStopCancellationIds = new Set();
   const submittedVstIsolatedMarginSymbols = new Set();
   const submittedVstSourceExitRequestIds = new Set();
-  const origin = ORIGINS[environment];
+  const origin = realAccount ? ORIGINS.mainnet : ORIGINS[environment];
   const marginAsset = environment === "vst" ? "VST" : "USDT";
 
   function reportRateLimit(path, method, outcome) {
@@ -902,7 +962,13 @@ export function createBingXLiveApi({
     }
   }
 
-  async function requestUncoalesced(method, path, params = {}, {
+  async function requestUncoalesced(method, path, params = {}, options = {}) {
+    if (!realAccount) return requestOnHost(method, path, params, options);
+    return realAccountData(path,
+      await requestOnHost(method, path, realAccountParams(params), options));
+  }
+
+  async function requestOnHost(method, path, params = {}, {
     beforeSign, beforeTransport, onTransportStart, exposeVstPreSignReason = false,
   } = {}) {
     const readContext = preparationReadContext.getStore();

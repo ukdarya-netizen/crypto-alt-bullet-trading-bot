@@ -808,6 +808,11 @@ export function createSourceSyncLivenessAlerter({ token, chatId, fetcher = fetch
 // Equivalent outcome events for one signal share the repeat window.
 const VST_TELEGRAM_REPEAT_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+/** "BingX VST · X" -> "BingX REAL · X"; VST amounts are USDT on the real account. */
+export function toRealAccountText(message) {
+  return String(message).replaceAll("BingX VST", "BingX REAL").replace(/\bVST\b/g, "USDT");
+}
+
 export function isUserFacingVstEvent(row) {
   return vstTradeOutcome(row) !== null;
 }
@@ -818,7 +823,7 @@ export function isUserFacingVstEvent(row) {
  * account traded. `lockId` separates the delivery lock of each ledger.
  */
 export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch, label = "",
-  lockId = LOCK_ID }) {
+  lockId = LOCK_ID, realAccount = false }) {
   if (!pool || typeof pool.connect !== "function") throw new Error("Telegram notifier needs a DB pool");
   validateTelegramCredentials(token, chatId);
   const retryAfterByEvent = new Map();
@@ -919,6 +924,8 @@ export function createVstTelegramNotifier({ pool, token, chatId, fetcher = fetch
               createdAt: row.created_at,
             });
             if (!message) throw new Error("Unrecognized VST Telegram event");
+            // A trade on the real account must never read as a demo one.
+            if (realAccount) message = toRealAccountText(message);
             if (label) message = `${label} · ${message}`;
             await postTelegramMessage({ token, chatId, text: message, fetcher });
           } catch (error) {

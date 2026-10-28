@@ -11,9 +11,14 @@
 //     source exits (AltBullet closed the trade) are copied the same way.
 // "Стоп" stops new entries immediately; open positions keep being managed
 // (stop-loss, take, closes) until they are closed, then the worker stops.
-// Phase 1: VST demo accounts only. Mainnet stays disabled.
+// Accounts (owner 2026-10-28): "vst" (BingX demo, default) or "real" (the
+// real BingX account). REAL runs the very same managed executor; only the
+// exchange host and the margin-asset name differ (see bingx-live-api
+// REAL_ACCOUNT_CAPABILITY). REAL needs the owner's permission per person
+// (the owner herself is always allowed) and a key verified on the real
+// account; each account has its own ledger schema (sub_<id> / subr_<id>).
 import { createSubscriberSchemaPool } from "@workspace/db";
-import { createBingXLiveApi } from "./bingx-live-api.mjs";
+import { REAL_ACCOUNT_CAPABILITY, createBingXLiveApi } from "./bingx-live-api.mjs";
 import { createVstBroker } from "./vst-broker.mjs";
 import { createVstStore } from "./vst-store.mjs";
 import { createVstWorker } from "./vst-worker.mjs";
@@ -45,12 +50,19 @@ export function subscriberTradingStrategy(row) {
 }
 
 const LEADER_LOCK_BASE = 100_000;
+const REAL_LEADER_LOCK_BASE = 200_000;
+export const TRADING_ACCOUNTS = Object.freeze(["vst", "real"]);
+/** The account this subscriber trades on: "real" only when everything allows it. */
+export function subscriberAccount(row) {
+  return row?.trading_account === "real" ? "real" : "vst";
+}
 const RECONCILE_MS = 15_000;
 const FEED_MS = 5_000;
 const TAKE_WATCH_MS = 3_000;
 const TELEGRAM_MS = 5_000;
 // Delivery lock ids of subscriber ledgers (the owner's ledger uses 1).
 const TELEGRAM_LOCK_BASE = 100_000;
+const REAL_TELEGRAM_LOCK_BASE = 300_000;
 
 /** "Кабинет · <name or e-mail> · BingX VST · SYMBOL" — whose test account traded. */
 export function subscriberTelegramLabel(row) {
@@ -95,6 +107,11 @@ const SUBSCRIBERS_UPGRADES = [
   // Strategy "patterns": exit choice and 1-3 chosen patterns ("a,b").
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS pattern_exit text",
   "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS patterns text",
+  // REAL account (owner 2026-10-28).
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS trading_account text DEFAULT 'vst' NOT NULL",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS real_allowed boolean DEFAULT false NOT NULL",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS real_key_verified_at timestamp with time zone",
+  "ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS key_is_owner_main boolean DEFAULT false NOT NULL",
 ];
 const ensuredPools = new WeakMap();
 
@@ -113,18 +130,19 @@ export function ensureSubscribersTable(pool) {
   return pending;
 }
 
-export function subscriberSchema(id) {
+export function subscriberSchema(id, account = "vst") {
   if (!Number.isSafeInteger(id) || id < 1) throw new Error("invalid subscriber id");
-  return `sub_${id}`;
+  if (!TRADING_ACCOUNTS.includes(account)) throw new Error("invalid trading account");
+  return account === "real" ? `subr_${id}` : `sub_${id}`;
 }
 
 /** Creates the subscriber schema and copies every public vst_* table definition into it. */
-export async function ensureSubscriberSchema(ownerPool, id) {
-  const schema = subscriberSchema(id);
+export async function ensureSubscriberSchema(ownerPool, id, account = "vst") {
+  const schema = subscriberSchema(id, account);
   const client = await ownerPool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("SELECT pg_advisory_xact_lock(4348999, $1)", [id]);
+    await client.query("SELECT pg_advisory_xact_lock(4348999, $1)", [account === "real" ? -id : id]);
     await client.query(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
     const tables = await client.query(
       `SELECT table_name FROM information_schema.tables
@@ -168,8 +186,12 @@ export function createSubscriberTradingManager({
 
   async function startRunner(sub) {
     const id = sub.id;
+    const account = subscriberAccount(sub);
     const strategy = subscriberTradingStrategy(sub);
     if (!strategy) throw new Error("strategy_not_available");
+    if (account === "real" && (!sub.real_allowed || !sub.real_key_verified_at)) {
+      throw new Error("real_account_not_allowed_or_key_not_verified");
+    }
     const stopBufferRate = Number(configuration.BULLET_VST_STOP_BUFFER_RATE);
     if (!Number.isFinite(stopBufferRate) || stopBufferRate <= 0 || stopBufferRate >= 1) {
       throw new Error("BULLET_VST_STOP_BUFFER_RATE is not configured");
@@ -183,20 +205,22 @@ export function createSubscriberTradingManager({
     // after it was saved is never used.
     const { permissions } = await readBingXKeyPermissions(credentials);
     if (forbiddenPermissions(permissions).length) throw new Error("key_has_money_moving_permissions");
-    await ensureSubscriberSchema(ownerPool, id);
-    const pool = createSubscriberSchemaPool(subscriberSchema(id));
-    const store = createVstStore(pool, { leaderLockId: LEADER_LOCK_BASE + id });
+    await ensureSubscriberSchema(ownerPool, id, account);
+    const pool = createSubscriberSchemaPool(subscriberSchema(id, account));
+    const store = createVstStore(pool, {
+      leaderLockId: (account === "real" ? REAL_LEADER_LOCK_BASE : LEADER_LOCK_BASE) + id });
     const api = createBingXLiveApi({
       environment: "vst",
+      ...(account === "real" ? { account: REAL_ACCOUNT_CAPABILITY } : {}),
       credentials: () => credentials,
       writePermission: ({ method, path }) => method !== "GET" && VST_WRITE_PATHS.has(path),
       positionProfile,
     });
     const broker = createVstBroker({
-      api, accountId: `sub-${id}`, canarySymbols: ["BTCUSDT"], stopBufferRate,
+      api, accountId: account === "real" ? `subr-${id}` : `sub-${id}`, canarySymbols: ["BTCUSDT"], stopBufferRate,
     });
     const runner = {
-      id, version: sub.version, pool, store, tradingEnabled: Boolean(sub.trading_enabled),
+      id, account, version: sub.version, pool, store, tradingEnabled: Boolean(sub.trading_enabled),
       feedCursor: new Date(sub.trading_started_at ?? clock()), lastResult: null, lastReportAt: 0,
       timers: [], scheduler: null,
     };
@@ -272,14 +296,15 @@ export function createSubscriberTradingManager({
           `UPDATE vst_events SET telegram_sent_at = now()
            WHERE telegram_sent_at IS NULL AND created_at < now() - interval '1 hour'`);
         const notifier = createVstTelegramNotifier({ pool, token, chatId,
-          label: subscriberTelegramLabel(sub), lockId: TELEGRAM_LOCK_BASE + id });
+          label: subscriberTelegramLabel(sub), realAccount: account === "real",
+          lockId: (account === "real" ? REAL_TELEGRAM_LOCK_BASE : TELEGRAM_LOCK_BASE) + id });
         every(TELEGRAM_MS, () => notifier.tick());
       } catch (error) {
         log(`Subscriber ${id} Telegram notifications unavailable: ${error instanceof Error ? error.message : "error"}`);
       }
     }
     runners.set(id, runner);
-    log(`Subscriber ${id} trading worker started (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
+    log(`Subscriber ${id} trading worker started on ${account.toUpperCase()} (${sub.strategy} → ${strategy.exitStrategy}${strategy.patterns ? ` [${strategy.patterns.join(",")}]` : ""}, ${positionProfile.allocation.mode} ${positionProfile.allocation.value}, ${positionProfile.marginMode} ${positionProfile.leverage}x)`);
     await setRuntime(id, "started");
     return runner;
   }

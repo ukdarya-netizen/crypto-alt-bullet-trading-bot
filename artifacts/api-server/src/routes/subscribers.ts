@@ -4,11 +4,11 @@ import { pool } from "@workspace/db";
 import { requireJournalOwner, requireJournalSession } from "../middlewares/journalAccess";
 import { vstPerformanceRow } from "../lib/vst-performance";
 // @ts-expect-error JavaScript module of the bot.
-import { encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPermissions, subscriberKeysConfigured } from "../bullet-bot/subscriber-keys.mjs";
+import { decryptSecret, encryptSecret, forbiddenPermissions, plausibleBingXKey, readBingXKeyPermissions, subscriberKeysConfigured } from "../bullet-bot/subscriber-keys.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { createBingXLiveApi } from "../bullet-bot/bingx-live-api.mjs";
+import { REAL_ACCOUNT_CAPABILITY, createBingXLiveApi } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberSchema, subscriberTradingStrategy } from "../bullet-bot/subscriber-trading.mjs";
+import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberAccount, subscriberSchema, subscriberTradingStrategy } from "../bullet-bot/subscriber-trading.mjs";
 // @ts-expect-error JavaScript module of the bot.
 import { EXIT_CHOICES, TRADE_PATTERNS, TRADE_PATTERN_LABELS, describeTradingStrategy, resolveTradingStrategy } from "../bullet-bot/trading-strategy.mjs";
 // @ts-expect-error JavaScript module of the bot.
@@ -55,6 +55,10 @@ function publicView(row: Row) {
       leverage: Number(row.leverage ?? 10),
       marginMode: (row.margin_mode as string | undefined) ?? "ISOLATED",
     },
+    tradingAccount: subscriberAccount(row) as "vst" | "real",
+    realAllowed: Boolean(row.real_allowed),
+    realKeyVerifiedAt: row.real_key_verified_at ?? null,
+    keyIsOwnerMain: Boolean(row.key_is_owner_main),
     tradingEnabled: Boolean(row.trading_enabled),
     tradingStartedAt: row.trading_started_at ?? null,
     runtimeStatus: row.runtime_status ?? null,
@@ -72,10 +76,15 @@ async function subscriberFor(req: Request): Promise<Row> {
   const userId = getAuth(req).userId;
   if (isOwner(userId) && row.status !== "approved") {
     const approved = await pool.query(
-      `UPDATE subscribers SET status = 'approved', decided_at = now(), decided_by = $2,
+      `UPDATE subscribers SET status = 'approved', real_allowed = true, decided_at = now(), decided_by = $2,
          version = version + 1, updated_at = now() WHERE id = $1 RETURNING *`,
       [row.id, userId]);
     return approved.rows[0] as Row;
+  }
+  if (isOwner(userId) && !row.real_allowed) {
+    const allowed = await pool.query(
+      "UPDATE subscribers SET real_allowed = true, updated_at = now() WHERE id = $1 RETURNING *", [row.id]);
+    return allowed.rows[0] as Row;
   }
   return row;
 }
@@ -104,17 +113,28 @@ function refuse(res: Response, status: number, code: string, message: string) {
   res.status(status).json({ error: { code, message } });
 }
 
-async function schemaExists(id: number): Promise<boolean> {
+async function schemaExists(id: number, account: string): Promise<boolean> {
   const result = await pool.query(
     "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'vst_positions'",
-    [subscriberSchema(id)],
+    [subscriberSchema(id, account)],
   );
   return Boolean(result.rowCount);
 }
 
-async function performance(id: number) {
-  if (!(await schemaExists(id))) return { trades: [], openPositions: 0 };
-  const schema = subscriberSchema(id) as string;
+/** Read-only balance check of a key on the REAL BingX account (USDT). */
+async function realAccountBalance(key: string, secret: string): Promise<string | null> {
+  const api = createBingXLiveApi({
+    environment: "vst", account: REAL_ACCOUNT_CAPABILITY,
+    credentials: () => ({ key, secret }), writePermission: () => false,
+  });
+  const balance = await api.getBalance();
+  const row = (balance as { balance?: { balance?: string; equity?: string } } | null)?.balance;
+  return row?.balance ?? row?.equity ?? null;
+}
+
+async function performance(id: number, account = "vst") {
+  if (!(await schemaExists(id, account))) return { trades: [], openPositions: 0 };
+  const schema = subscriberSchema(id, account) as string;
   const [closed, open] = await Promise.all([
     pool.query(
       `SELECT p.source_signal_id, p.symbol, p.snapshot, p.updated_at, s.body->>'patternId' AS pattern_id
@@ -163,7 +183,7 @@ router.get("/me/performance", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const row = await subscriberFor(req);
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
-  res.json(await performance(row.id));
+  res.json(await performance(row.id, subscriberAccount(row)));
 });
 
 router.post("/me/api-key", async (req, res) => {
@@ -172,17 +192,17 @@ router.post("/me/api-key", async (req, res) => {
   if (!subscriberKeysConfigured()) {
     return refuse(res, 503, "keys_secret_missing", "Хранилище ключей не настроено владельцем");
   }
+  if ((await performance(row.id, subscriberAccount(row))).openPositions > 0) {
+    return refuse(res, 409, "positions_open", "Есть открытые сделки: ключ можно заменить после их закрытия");
+  }
   const apiKey = String(req.body?.apiKey ?? "").trim();
   const apiSecret = String(req.body?.apiSecret ?? "").trim();
   if (!plausibleBingXKey(apiKey) || !plausibleBingXKey(apiSecret)) {
     return refuse(res, 422, "key_format", "Ключ и секрет — это латинские буквы и цифры из BingX");
   }
-  // The owner's main bot already trades the account of BINGX_API_KEY; a second
-  // bot on the same account would open duplicate positions and fight over them.
-  if (process.env.BINGX_API_KEY && apiKey === process.env.BINGX_API_KEY.trim()) {
-    return refuse(res, 409, "same_as_owner_bot",
-      "Этим ключом уже торгует основной бот владельца. Нужен ключ другого аккаунта BingX (например, субаккаунта).");
-  }
+  // The owner's main bot trades the DEMO (VST) account of BINGX_API_KEY. The
+  // same key is fine for REAL, but never for a second bot on that demo account.
+  const keyIsOwnerMain = Boolean(process.env.BINGX_API_KEY) && apiKey === process.env.BINGX_API_KEY!.trim();
   // 1) The key must not be able to move money (withdraw / transfers).
   let permissions: number[];
   try {
@@ -215,21 +235,31 @@ router.post("/me/api-key", async (req, res) => {
       [row.id, message.slice(0, 300)]);
     return refuse(res, 422, "key_rejected", `BingX не принял ключ: ${message.slice(0, 200)}`);
   }
+  // 3) Read-only check on the REAL account; failure only means REAL is unavailable.
+  let balanceReal: string | null = null;
+  let realOk = false;
+  try { balanceReal = await realAccountBalance(apiKey, apiSecret); realOk = true; } catch {}
   await pool.query(
     `UPDATE subscribers SET api_key_encrypted = $2, api_secret_encrypted = $3, api_key_last4 = $4,
-       api_key_verified_at = now(), api_key_error = NULL, version = version + 1, updated_at = now()
+       api_key_verified_at = now(), api_key_error = NULL, key_is_owner_main = $5,
+       real_key_verified_at = CASE WHEN $6 THEN now() ELSE NULL END,
+       version = version + 1, updated_at = now()
      WHERE id = $1`,
-    [row.id, encryptSecret(apiKey), encryptSecret(apiSecret), apiKey.slice(-4)],
+    [row.id, encryptSecret(apiKey), encryptSecret(apiSecret), apiKey.slice(-4), keyIsOwnerMain, realOk],
   );
   const vst = (balance as { balance?: { balance?: string; equity?: string } } | null)?.balance;
-  res.json({ verified: true, balanceVst: vst?.balance ?? vst?.equity ?? null });
+  res.json({ verified: true, balanceVst: vst?.balance ?? vst?.equity ?? null, balanceReal, realVerified: realOk });
 });
 
 router.delete("/me/api-key", async (req, res) => {
   const row = await subscriberFor(req);
+  // Without the key the bot cannot manage open positions (stop, take, close).
+  if ((await performance(row.id, subscriberAccount(row))).openPositions > 0) {
+    return refuse(res, 409, "positions_open", "Есть открытые сделки: ключ можно удалить после их закрытия");
+  }
   await pool.query(
     `UPDATE subscribers SET api_key_encrypted = NULL, api_secret_encrypted = NULL, api_key_last4 = NULL,
-       api_key_verified_at = NULL, trading_enabled = false, trading_stopped_at = now(),
+       api_key_verified_at = NULL, real_key_verified_at = NULL, key_is_owner_main = false, trading_enabled = false, trading_stopped_at = now(),
        version = version + 1, updated_at = now()
      WHERE id = $1`,
     [row.id],
@@ -288,7 +318,7 @@ router.post("/me/position-settings", async (req, res) => {
   if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
   if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
   // Open positions are managed with the leverage/margin they were opened with.
-  const perf = await performance(row.id);
+  const perf = await performance(row.id, subscriberAccount(row));
   if (perf.openPositions > 0) {
     return refuse(res, 409, "positions_open", "Дождитесь закрытия открытых сделок, потом меняйте настройки");
   }
@@ -319,6 +349,39 @@ router.post("/me/position-settings", async (req, res) => {
   });
 });
 
+// Account: "vst" (demo) or "real". Switch only when stopped and flat.
+router.post("/me/account", async (req, res) => {
+  const row = await subscriberFor(req);
+  if (row.status !== "approved") return refuse(res, 403, "not_approved", "Заявка ещё не одобрена");
+  const account = String(req.body?.account ?? "");
+  if (account !== "vst" && account !== "real") return refuse(res, 422, "account", "Такого счёта нет");
+  if (account === subscriberAccount(row)) return res.json({ account });
+  if (row.trading_enabled) return refuse(res, 409, "trading_running", "Сначала остановите торговлю");
+  const perf = await performance(row.id, subscriberAccount(row));
+  if (perf.openPositions > 0) {
+    return refuse(res, 409, "positions_open", "Дождитесь закрытия открытых сделок на текущем счёте");
+  }
+  let realVerified = Boolean(row.real_key_verified_at);
+  if (account === "real") {
+    if (!row.real_allowed) return refuse(res, 403, "real_not_allowed", "Владелец не разрешил реальный счёт");
+    if (req.body?.confirm !== true) return refuse(res, 422, "confirm", "Подтвердите торговлю на реальные деньги");
+    if (!row.api_key_encrypted || !row.api_secret_encrypted) return refuse(res, 422, "no_key", "Сначала добавьте ключ BingX");
+    try {
+      await realAccountBalance(decryptSecret(row.api_key_encrypted as string), decryptSecret(row.api_secret_encrypted as string));
+      realVerified = true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "BingX error";
+      return refuse(res, 422, "real_key_rejected", `Реальный счёт BingX не принял ключ: ${message.slice(0, 200)}`);
+    }
+  }
+  await pool.query(
+    `UPDATE subscribers SET trading_account = $2,
+       real_key_verified_at = CASE WHEN $3 THEN COALESCE(real_key_verified_at, now()) ELSE real_key_verified_at END,
+       version = version + 1, updated_at = now() WHERE id = $1`,
+    [row.id, account, realVerified]);
+  res.json({ account });
+});
+
 router.post("/me/trading", async (req, res) => {
   const row = await subscriberFor(req);
   const enable = req.body?.enabled === true;
@@ -327,6 +390,13 @@ router.post("/me/trading", async (req, res) => {
     if (!row.api_key_verified_at) return refuse(res, 422, "no_key", "Сначала добавьте и проверьте ключ BingX");
     if (!subscriberTradingStrategy(row)) {
       return refuse(res, 422, "no_strategy", "Выберите стратегию");
+    }
+    if (subscriberAccount(row) === "vst" && row.key_is_owner_main) {
+      return refuse(res, 409, "same_as_owner_bot",
+        "На демо-счёте этого ключа уже торгует основной бот. Выберите реальный счёт или ключ другого аккаунта BingX.");
+    }
+    if (subscriberAccount(row) === "real" && (!row.real_allowed || !row.real_key_verified_at)) {
+      return refuse(res, 403, "real_not_ready", "Реальный счёт не разрешён владельцем или ключ не проверен на реальном счёте");
     }
     await pool.query(
       "UPDATE subscribers SET trading_enabled = true, trading_started_at = now(), updated_at = now() WHERE id = $1",
@@ -377,6 +447,21 @@ router.post("/journal/trading-strategy", requireJournalSession, requireJournalOw
     patterns: saved.patterns ?? [], strategyText: describeTradingStrategy(saved) });
 });
 
+// Owner: allow / forbid the REAL account for a person. Forbidding stops new
+// entries at once; open REAL positions keep being managed until closed.
+router.post("/journal/subscribers/:id/real", requireJournalSession, requireJournalOwner, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id)) return refuse(res, 422, "invalid_id", "Неверный подписчик");
+  const allowed = req.body?.allowed === true;
+  const result = await pool.query(
+    `UPDATE subscribers SET real_allowed = $2,
+       trading_enabled = CASE WHEN $2 = false AND trading_account = 'real' THEN false ELSE trading_enabled END,
+       updated_at = now() WHERE id = $1 RETURNING *`,
+    [id, allowed]);
+  if (!result.rowCount) return refuse(res, 404, "not_found", "Подписчик не найден");
+  res.json({ subscriber: publicView(result.rows[0] as Row) });
+});
+
 router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, async (_req, res) => {
   res.setHeader("Cache-Control", "no-store");
   const { rows } = await pool.query("SELECT * FROM subscribers ORDER BY status = 'pending' DESC, requested_at DESC");
@@ -384,7 +469,7 @@ router.get("/journal/subscribers", requireJournalSession, requireJournalOwner, a
     let stats = { closed: 0, netUsdt: 0, openPositions: 0 };
     if (row.status === "approved") {
       try {
-        const perf = await performance(row.id);
+        const perf = await performance(row.id, subscriberAccount(row));
         const known = perf.trades.filter((trade) => trade.pnlUsdt !== null);
         stats = {
           closed: perf.trades.length,

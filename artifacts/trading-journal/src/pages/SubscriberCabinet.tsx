@@ -78,10 +78,11 @@ function KeyStep({ sub, keysConfigured, onChanged }: { sub: Subscription; keysCo
   const [editing, setEditing] = useState(!sub.apiKeyVerifiedAt);
   const [message, setMessage] = useState<string | null>(null);
   const save = useMutation({
-    mutationFn: () => api<{ verified: boolean; balanceVst: string | null }>("/me/api-key", { method: "POST", body: { apiKey, apiSecret } }),
+    mutationFn: () => api<{ verified: boolean; balanceVst: string | null; balanceReal: string | null; realVerified: boolean }>("/me/api-key", { method: "POST", body: { apiKey, apiSecret } }),
     onSuccess: (data) => {
       setApiKey(""); setApiSecret(""); setEditing(false);
-      setMessage(`Ключ проверен${data.balanceVst ? `, баланс демо-счёта VST: ${data.balanceVst}` : ""}`);
+      setMessage(`Ключ проверен${data.balanceVst ? `, демо-счёт VST: ${data.balanceVst}` : ""}${
+        data.realVerified ? `, реальный счёт: ${data.balanceReal ?? "—"} USDT` : ", реальный счёт ключ не принял"}`);
       onChanged();
     },
     onError: (error) => setMessage(error instanceof ApiFailure ? error.message : "Не удалось сохранить ключ"),
@@ -95,7 +96,8 @@ function KeyStep({ sub, keysConfigured, onChanged }: { sub: Subscription; keysCo
       {!keysConfigured && <p className="mb-3 text-sm text-amber-300">Владелец ещё не включил хранилище ключей. Попробуйте позже.</p>}
       {sub.apiKeyVerifiedAt && !editing ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm">Ключ <b>••••{sub.apiKeyLast4}</b> проверен и сохранён в зашифрованном виде.</p>
+          <p className="text-sm">Ключ <b>••••{sub.apiKeyLast4}</b> проверен и сохранён в зашифрованном виде.
+            {sub.realKeyVerifiedAt ? " Реальный счёт: ключ подходит." : " Реальный счёт: ключ не проверен."}</p>
           <div className="flex gap-2">
             <button type="button" onClick={() => setEditing(true)} className="border border-border px-3 py-2 text-xs font-bold hover:bg-muted">Заменить</button>
             <button type="button" onClick={() => remove.mutate()} className="border border-destructive/40 px-3 py-2 text-xs font-bold text-destructive hover:bg-destructive/10">Удалить</button>
@@ -175,11 +177,12 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
     onSuccess: () => { setMessage({ text: "Сохранено", bad: false }); onChanged(); },
     onError: (e) => setMessage({ text: e instanceof ApiFailure ? e.message : "Не удалось сохранить", bad: true }),
   });
+  const unit = sub.tradingAccount === "real" ? "USDT" : "VST";
   const example = valid
     ? mode === "percent"
-      ? `При балансе 10 000 VST: в сделку ${(10_000 * numeric / 100).toLocaleString("ru-RU")} VST своих, позиция ${(10_000 * numeric / 100 * leverage).toLocaleString("ru-RU")} VST.`
-      : `В сделку ${numeric.toLocaleString("ru-RU")} VST своих, позиция ${(numeric * leverage).toLocaleString("ru-RU")} VST.`
-    : mode === "percent" ? `Процент от ${limits.min} до ${limits.max}.` : `Сумма от ${limits.min} VST.`;
+      ? `При балансе 10 000 ${unit}: в сделку ${(10_000 * numeric / 100).toLocaleString("ru-RU")} ${unit} своих, позиция ${(10_000 * numeric / 100 * leverage).toLocaleString("ru-RU")} ${unit}.`
+      : `В сделку ${numeric.toLocaleString("ru-RU")} ${unit} своих, позиция ${(numeric * leverage).toLocaleString("ru-RU")} ${unit}.`
+    : mode === "percent" ? `Процент от ${limits.min} до ${limits.max}.` : `Сумма от ${limits.min} ${unit}.`;
   return (
     <Step n={3} title="Размер сделки" done={!changed}>
       <div className="space-y-5">
@@ -190,7 +193,7 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
           <div className="flex items-center gap-2">
             <input value={value} onChange={(e) => setValue(e.target.value)} inputMode="decimal" disabled={locked}
               className={`h-11 w-32 border px-3 text-sm tabular ${valid ? "border-input" : "border-destructive"}`} />
-            <span className="text-sm text-muted-foreground">{mode === "percent" ? "% от баланса" : "VST"}</span>
+            <span className="text-sm text-muted-foreground">{mode === "percent" ? "% от баланса" : unit}</span>
           </div>
           <p className={`text-xs ${valid ? "text-muted-foreground" : "text-destructive"}`}>{example}</p>
         </div>
@@ -226,11 +229,51 @@ function SizeStep({ sub, choices, onChanged }: { sub: Subscription; choices: Pos
             className="h-11 bg-primary px-5 text-sm font-bold text-primary-foreground disabled:opacity-40">
             {save.isPending ? "Сохраняю…" : "Сохранить"}
           </button>
-          <span className="text-xs text-muted-foreground">Сейчас: {positionSettingsText(saved)}</span>
+          <span className="text-xs text-muted-foreground">Сейчас: {positionSettingsText(saved, sub.tradingAccount)}</span>
         </div>
         {locked && <p className="text-xs text-muted-foreground">Менять можно после «Стоп» и закрытия открытых сделок.</p>}
         {message && <p className={`text-sm ${message.bad ? "text-destructive" : "text-success"}`}>{message.text}</p>}
       </div>
+    </Step>
+  );
+}
+
+function AccountStep({ sub, onChanged }: { sub: Subscription; onChanged: () => void }) {
+  const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const change = useMutation({
+    mutationFn: (account: "vst" | "real") => api("/me/account", { method: "POST", body: { account, confirm } }),
+    onSuccess: () => { setError(null); setConfirm(false); onChanged(); },
+    onError: (e) => setError(e instanceof ApiFailure ? e.message : "Не удалось"),
+  });
+  const real = sub.tradingAccount === "real";
+  return (
+    <Step n={4} title="Счёт" done>
+      <div className="grid grid-cols-2 border border-border">
+        <button type="button" disabled={sub.tradingEnabled || change.isPending || !real}
+          onClick={() => change.mutate("vst")} aria-pressed={!real}
+          className={`h-11 px-3 text-sm font-bold disabled:cursor-not-allowed ${!real ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
+          Демо VST
+        </button>
+        <button type="button" disabled={sub.tradingEnabled || change.isPending || real || !sub.realAllowed || !confirm}
+          onClick={() => change.mutate("real")} aria-pressed={real}
+          className={`h-11 px-3 text-sm font-bold disabled:cursor-not-allowed ${real ? "bg-destructive text-destructive-foreground" : "text-muted-foreground hover:bg-muted"}`}>
+          Реальный счёт
+        </button>
+      </div>
+      {real ? (
+        <p className="mt-3 text-sm font-semibold text-destructive">Торговля на реальном счёте BingX — реальные деньги (USDT).</p>
+      ) : sub.realAllowed ? (
+        <label className="mt-3 flex items-start gap-2 text-sm">
+          <input type="checkbox" checked={confirm} onChange={(e) => setConfirm(e.target.checked)} disabled={sub.tradingEnabled}
+            className="mt-0.5 h-4 w-4" />
+          <span>Понимаю: на реальном счёте бот торгует реальными деньгами по тем же правилам, что на демо.</span>
+        </label>
+      ) : (
+        <p className="mt-3 text-xs text-muted-foreground">Реальный счёт открывает владелец.</p>
+      )}
+      {sub.tradingEnabled && <p className="mt-2 text-xs text-muted-foreground">Счёт можно сменить после «Стоп» и закрытия открытых сделок.</p>}
+      {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
     </Step>
   );
 }
@@ -246,7 +289,7 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
   const ready = Boolean(sub.apiKeyVerifiedAt && sub.strategy);
   const dot = { ok: "bg-success", wait: "bg-amber-400", bad: "bg-destructive", off: "bg-muted-foreground" }[state.tone];
   return (
-    <Step n={4} title="Торговля" done={sub.tradingEnabled}>
+    <Step n={5} title="Торговля" done={sub.tradingEnabled}>
       <p className="mb-4 flex items-start gap-2 text-sm"><span className={`mt-1.5 h-2 w-2 shrink-0 ${dot}`} />{state.text}</p>
       {sub.tradingEnabled ? (
         <button type="button" onClick={() => toggle.mutate(false)} disabled={toggle.isPending}
@@ -261,7 +304,10 @@ function TradingStep({ sub, onChanged }: { sub: Subscription; onChanged: () => v
       )}
       {!ready && !sub.tradingEnabled && <p className="mt-3 text-xs text-muted-foreground">Сначала шаги 1 и 2.</p>}
       <p className="mt-4 text-xs text-muted-foreground">
-        Торговля идёт на демо-счёте BingX VST. Размер сделки: {positionSettingsText(sub.positionSettings)}.
+        {sub.tradingAccount === "real"
+          ? <b className="text-destructive">Торговля идёт на РЕАЛЬНОМ счёте BingX. </b>
+          : "Торговля идёт на демо-счёте BingX VST. "}
+        Размер сделки: {positionSettingsText(sub.positionSettings, sub.tradingAccount)}.
         «Стоп» сразу прекращает новые входы; уже открытые сделки бот доводит до закрытия.
       </p>
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
@@ -332,9 +378,9 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
     <Wrap>
       {embedded ? (
         <p className="border border-primary/30 bg-primary/5 p-4 text-sm">
-          Это та же страница, что видят подписчики. Здесь отдельный бот на отдельном ключе BingX:
-          он не связан с основным ботом (VST · бот) и его стратегией. Ключ основного бота сюда не подойдёт —
-          два бота на одном счёте мешали бы друг другу. Нужен ключ другого аккаунта BingX.
+          Это та же страница, что видят подписчики. Здесь отдельный бот, не связанный с основным
+          (VST · бот) и его стратегией. Счёт — демо VST или реальный. Ключ основного бота подходит
+          только для реального счёта: на его демо-счёте уже торгует основной бот.
         </p>
       ) : (
         <div className="flex items-center gap-3">
@@ -345,6 +391,7 @@ export function SubscriberCabinetBody({ embedded = false }: { embedded?: boolean
       <KeyStep sub={sub} keysConfigured={keysConfigured} onChanged={refresh} />
       <StrategyStep sub={sub} choices={strategyChoices} onChanged={refresh} />
       <SizeStep key={JSON.stringify(sub.positionSettings)} sub={sub} choices={positionChoices} onChanged={refresh} />
+      <AccountStep sub={sub} onChanged={refresh} />
       <TradingStep sub={sub} onChanged={refresh} />
       <Results />
       <p className="flex items-center gap-2 text-xs text-muted-foreground"><KeyRound className="h-3.5 w-3.5" />Ключ хранится зашифрованным и никому не показывается, включая владельца.</p>

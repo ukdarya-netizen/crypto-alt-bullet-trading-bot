@@ -29,6 +29,11 @@ export default function JournalSubscribers() {
       api(`/journal/subscribers/${id}/decision`, { method: "POST", body: { decision } }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ["owner-subscribers"] }),
   });
+  const real = useMutation({
+    mutationFn: ({ id, allowed }: { id: number; allowed: boolean }) =>
+      api(`/journal/subscribers/${id}/real`, { method: "POST", body: { allowed } }),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ["owner-subscribers"] }),
+  });
   const rows = query.data?.subscribers ?? [];
   const pending = rows.filter((row) => row.status === "pending");
   const others = rows.filter((row) => row.status !== "pending");
@@ -47,8 +52,9 @@ export default function JournalSubscribers() {
         {row.status === "approved" && (
           <div className="mt-3 grid grid-cols-2 gap-3 text-sm sm:grid-cols-5">
             <div><p className="text-[10px] uppercase text-muted-foreground">Ключ</p><p className={row.apiKeyVerifiedAt ? "text-success" : "text-muted-foreground"}>{row.apiKeyVerifiedAt ? `••••${row.apiKeyLast4}` : "нет"}</p></div>
-            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategyText ?? "—"}</p><p className="text-[11px] text-muted-foreground">{positionSettingsText(row.positionSettings)}</p></div>
-            <div><p className="text-[10px] uppercase text-muted-foreground">Торговля</p><p className="flex items-center gap-1">{row.tradingEnabled ? <><Play className="h-3 w-3 text-success" />вкл</> : <><Pause className="h-3 w-3" />выкл</>}</p></div>
+            <div><p className="text-[10px] uppercase text-muted-foreground">Стратегия</p><p>{row.strategyText ?? "—"}</p><p className="text-[11px] text-muted-foreground">{positionSettingsText(row.positionSettings, row.tradingAccount)}</p></div>
+            <div><p className="text-[10px] uppercase text-muted-foreground">Торговля</p><p className="flex items-center gap-1">{row.tradingEnabled ? <><Play className="h-3 w-3 text-success" />вкл</> : <><Pause className="h-3 w-3" />выкл</>}</p>
+              <p className={`text-[11px] font-bold ${row.tradingAccount === "real" ? "text-destructive" : "text-muted-foreground"}`}>{row.tradingAccount === "real" ? "РЕАЛЬНЫЙ счёт" : "демо VST"}</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Сделки</p><p>{row.stats.closed} закр. · {row.stats.openPositions} откр.</p></div>
             <div><p className="text-[10px] uppercase text-muted-foreground">Прибыль</p><p className={`font-bold tabular ${toneClass(row.stats.closed ? row.stats.netUsdt : null)}`}>{row.stats.closed ? formatUsdt(row.stats.netUsdt) : "—"}</p></div>
           </div>
@@ -61,6 +67,12 @@ export default function JournalSubscribers() {
             <button type="button" onClick={() => decide.mutate({ id: row.id, decision: "reject" })}
               className="flex h-10 items-center gap-2 border border-border px-4 text-sm"><X className="h-4 w-4" />Отклонить</button>
           </>}
+          {row.status === "approved" && (
+            <button type="button" onClick={() => real.mutate({ id: row.id, allowed: !row.realAllowed })}
+              className={`flex h-9 items-center gap-2 border px-3 text-xs font-bold ${row.realAllowed ? "border-destructive/40 text-destructive" : "border-border"}`}>
+              {row.realAllowed ? "Закрыть реальный счёт" : "Разрешить реальный счёт"}
+            </button>
+          )}
           {row.status === "approved" && (
             <button type="button" onClick={() => { if (window.confirm("Заблокировать? Торговля подписчика остановится сразу; открытые позиции останутся на его бирже со стоп-лоссом.")) decide.mutate({ id: row.id, decision: "block" }); }}
               className="flex h-9 items-center gap-2 border border-destructive/40 px-3 text-xs font-bold text-destructive"><ShieldOff className="h-3.5 w-3.5" />Заблокировать</button>
@@ -78,7 +90,7 @@ export default function JournalSubscribers() {
     <section className="page-frame mx-auto max-w-4xl space-y-5" data-testid="page-subscribers">
       <p className="text-sm text-muted-foreground">
         Любой, кто зарегистрировался, появляется здесь как заявка. После одобрения человек сам вводит ключ BingX,
-        выбирает стратегию и нажимает «Старт». Торговля — только на демо-счёте BingX VST. Ключи хранятся зашифрованными, их не видно даже здесь.
+        выбирает стратегию и нажимает «Старт». По умолчанию торговля идёт на демо-счёте BingX VST; реальный счёт человек может выбрать, только если вы его разрешили. «Закрыть реальный счёт» сразу останавливает новые входы, открытые сделки бот доводит до закрытия. Ключи хранятся зашифрованными, их не видно даже здесь.
       </p>
       {query.data && !query.data.keysConfigured && (
         <p className="border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-200">
