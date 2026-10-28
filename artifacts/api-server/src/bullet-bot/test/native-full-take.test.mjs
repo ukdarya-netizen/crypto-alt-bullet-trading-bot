@@ -375,3 +375,22 @@ test("a take that cannot be placed backs off (2,4,8.. min) and names the failing
   await manager.sweep();
   assert.equal(f.state.posts, 1, "retried after the backoff and placed");
 });
+
+test("fill proof searches around the take's own fill time, not only the last 24h", async () => {
+  const { nativeTakeFillWindow } = await import("../native-full-take.mjs");
+  const now = Date.parse("2026-10-28T15:20:00Z");
+  const fillAt = Date.parse("2026-10-27T00:29:31Z");
+  const w = nativeTakeFillWindow({ createdAt: Date.parse("2026-10-27T00:21:31Z") },
+    { updateTime: fillAt }, now);
+  assert.ok(w.startTs <= fillAt && w.endTs >= fillAt);
+  assert.ok(w.endTs - w.startTs <= 20 * 60_000);
+  const old = nativeTakeFillWindow({ createdAt: 1 }, {}, now);
+  assert.equal(old.endTs, now);
+});
+
+test("entry price stored as a float matches the exchange's decimal", async () => {
+  const { sameEntryPrice } = await import("../native-full-take.mjs");
+  assert.ok(sameEntryPrice("0.00002280", "0.000022799999999999995"));
+  assert.ok(sameEntryPrice("0.0786", "0.0786"));
+  assert.ok(!sameEntryPrice("0.0786", "0.0787"));
+});

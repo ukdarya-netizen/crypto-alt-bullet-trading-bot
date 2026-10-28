@@ -36,6 +36,16 @@ function sumDecimal(values) {
   const scale = Math.max(0, ...parts.map((p) => p.scale));
   return decimalText(parts.reduce((n, p) => n + p.units * 10n ** BigInt(scale - p.scale), 0n), scale);
 }
+// FLOKI 2026-10-28: the stored entry is a float (0.000022799999999999995)
+// while the exchange reports "0.00002280"; exact equality never held and the
+// take was never placed. Same price within one part per billion.
+export function sameEntryPrice(a, b) {
+  if (equal(a, b)) return true;
+  const x = Number(a), y = Number(b);
+  return Number.isFinite(x) && Number.isFinite(y) && x > 0 && y > 0 &&
+    Math.abs(x - y) <= Math.max(x, y) * 1e-9;
+}
+
 export function nativeTakePrice(entry, precision, pct = 5) {
   const p = exactDecimalParts(entry);
   if (!p || p.units <= 0n || !Number.isInteger(precision) || precision < 0 || precision > 18)
@@ -159,7 +169,7 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
                   : entry.status !== "FILLED" || !positive(entry.executedQty) ? "entry_order_status"
                     : entry.symbol !== nativeSymbol(binding.symbol) || entry.side !== "BUY" ||
                         entry.positionSide !== "LONG" ? "entry_order_side"
-                      : !equal(entry.avgPrice, binding.entryPrice) ? "entry_avg_price" : null;
+                      : !sameEntryPrice(entry.avgPrice, binding.entryPrice) ? "entry_avg_price" : null;
       if (failed) throw new Error(`native_take_entry_or_settings_changed:${failed}`);
       checkStopRows(orders, binding, stops);
     };
@@ -275,15 +285,29 @@ export function createNativeTakeApi({ assertVst, readOrders, readPositions, quer
 // A native fill is established from complete, bounded exchange executions,
 // exact parent/child linkage and a fresh flat position. A missing position,
 // an acknowledgement, or a positive PnL is never fill evidence.
+export function nativeTakeFillWindow(binding, parent, now) {
+  // 2026-10-28 (BIRB, SIREN): the window was the last 24h, so a take filled
+  // earlier could never be proven. Search around the exchange's own fill
+  // time of the queried order (BingX keeps 7 days of fill history).
+  const retention = now - 7 * 86_400_000 + 60_000;
+  const fillAt = Number(parent?.updateTime ?? parent?.time);
+  if (Number.isSafeInteger(fillAt) && fillAt > 0 && fillAt <= now + 2_000) {
+    return {
+      startTs: Math.max(1, binding.createdAt - 60_000, fillAt - 600_000, retention),
+      endTs: Math.min(now, fillAt + 600_000),
+    };
+  }
+  return { startTs: Math.max(1, binding.createdAt - 60_000, now - 86_400_000), endTs: now };
+}
+
 export async function proveNativeTakeFill(api, binding, knownStops, now = Date.now()) {
   try {
-    const [parent, positions, orders, fills] = await Promise.all([
-      api.queryOrder(binding.symbol, { orderId: binding.orderId }),
+    const parent = await api.queryOrder(binding.symbol, { orderId: binding.orderId });
+    const window = nativeTakeFillWindow(binding, parent, now);
+    if (!(window.startTs < window.endTs)) return { verified: false };
+    const [positions, orders, fills] = await Promise.all([
       api.getPositions(binding.symbol), api.getOpenOrders(binding.symbol),
-      api.queryFills(binding.symbol, {
-        startTs: Math.max(1, binding.createdAt - 60_000, now - 86_400_000),
-        endTs: now, currency: "USDT", requireComplete: true,
-      }),
+      api.queryFills(binding.symbol, { ...window, currency: "USDT", requireComplete: true }),
     ]);
     if (!parent || parent.status !== "FILLED" || parent.symbol !== nativeSymbol(binding.symbol) ||
         parent.side !== "SELL" || parent.positionSide !== "LONG" ||
