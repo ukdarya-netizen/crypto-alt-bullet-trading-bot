@@ -8,7 +8,9 @@ import { decryptSecret, encryptSecret, forbiddenPermissions, plausibleBingXKey, 
 // @ts-expect-error JavaScript module of the bot.
 import { REAL_ACCOUNT_CAPABILITY, createBingXLiveApi } from "../bullet-bot/bingx-live-api.mjs";
 // @ts-expect-error JavaScript module of the bot.
-import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberAccount, subscriberSchema, subscriberTradingStrategy } from "../bullet-bot/subscriber-trading.mjs";
+import { SUBSCRIBER_STRATEGIES, ensureSubscribersTable, subscriberAccount, subscriberSchema, subscriberTelegramLabel, subscriberTradingStrategy } from "../bullet-bot/subscriber-trading.mjs";
+// @ts-expect-error JavaScript module of the bot.
+import { postTelegramMessage, redactTelegramError, validateTelegramCredentials } from "../bullet-bot/telegram-client.mjs";
 // @ts-expect-error JavaScript module of the bot.
 import { EXIT_CHOICES, TRADE_PATTERNS, TRADE_PATTERN_LABELS, describeTradingStrategy, resolveTradingStrategy } from "../bullet-bot/trading-strategy.mjs";
 // @ts-expect-error JavaScript module of the bot.
@@ -103,10 +105,36 @@ async function findOrCreateSubscriber(req: Request): Promise<Row> {
   const inserted = await pool.query(
     `INSERT INTO subscribers (clerk_user_id, email, name) VALUES ($1, $2, $3)
      ON CONFLICT (clerk_user_id) DO UPDATE SET clerk_user_id = EXCLUDED.clerk_user_id
-     RETURNING *`,
+     RETURNING *, (xmax = 0) AS created`,
     [userId, email, name],
   );
+  if (inserted.rows[0]?.created && userId !== process.env.JOURNAL_OWNER_USER_ID) {
+    notifyOwner(inserted.rows[0] as Row, ["Новая заявка в торговый бот. Одобрить — страница «Подписчики».",
+      email ? `E-mail: ${email}` : null]);
+  }
   return inserted.rows[0] as Row;
+}
+
+// Owner 2026-10-29: every change in a cabinet is reported to the owner's
+// Telegram chat (plain text). Never blocks or fails the request itself.
+const ACCOUNT_NAME = (account: string) => (account === "real" ? "РЕАЛЬНЫЙ счёт" : "демо-счёт VST");
+function notifyOwner(row: Row, lines: (string | null | undefined | false)[]) {
+  const token = process.env.TELEGRAM_BOT_TOKEN, chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) return;
+  const text = [subscriberTelegramLabel(row), ...lines.filter(Boolean)].join("\n");
+  void (async () => {
+    try {
+      validateTelegramCredentials(token, chatId);
+      await postTelegramMessage({ token, chatId, text, fetcher: fetch });
+    } catch (error) {
+      process.stderr.write(`Cabinet notice failed: ${redactTelegramError(error)}\n`);
+    }
+  })();
+}
+function sizeText(row: Row) {
+  const unit = subscriberAccount(row) === "real" ? "USDT" : "VST";
+  const size = row.allocation_mode === "amount" ? `${Number(row.allocation_value)} ${unit}` : `${Number(row.allocation_value)}% от баланса`;
+  return `${size} · ${row.margin_mode === "CROSSED" ? "кросс" : "изолированная"} · ${Number(row.leverage)}x`;
 }
 
 function refuse(res: Response, status: number, code: string, message: string) {
@@ -255,6 +283,8 @@ router.post("/me/api-key", async (req, res) => {
     [row.id, encryptSecret(apiKey), encryptSecret(apiSecret), apiKey.slice(-4), keyIsOwnerMain, realOk],
   );
   const vst = (balance as { balance?: { balance?: string; equity?: string } } | null)?.balance;
+  notifyOwner(row, [`Ключ BingX сохранён (••••${apiKey.slice(-4)}).`,
+    `Демо-счёт: ключ подходит. Реальный счёт: ${realOk ? "ключ подходит" : "ключ НЕ принят"}.`]);
   res.json({ verified: true, balanceVst: vst?.balance ?? vst?.equity ?? null, balanceReal, realVerified: realOk });
 });
 
@@ -271,6 +301,7 @@ router.delete("/me/api-key", async (req, res) => {
      WHERE id = $1`,
     [row.id],
   );
+  notifyOwner(row, ["Ключ BingX удалён. Торговля остановлена."]);
   res.json({ removed: true });
 });
 
@@ -317,6 +348,11 @@ router.post("/me/strategy", async (req, res) => {
     `UPDATE subscribers SET strategy = $2, pattern_exit = $3, patterns = $4,
        version = version + 1, updated_at = now() WHERE id = $1`,
     [row.id, choice.strategy, choice.patternExit, choice.patterns?.join(",") ?? null]);
+  {
+    const resolved = subscriberTradingStrategy({ strategy: choice.strategy, pattern_exit: choice.patternExit,
+      patterns: choice.patterns?.join(",") ?? null });
+    notifyOwner(row, [`Стратегия изменена: ${resolved ? describeTradingStrategy(resolved) : choice.strategy}.`]);
+  }
   res.json(choice);
 });
 
@@ -347,6 +383,8 @@ router.post("/me/position-settings", async (req, res) => {
        version = version + 1, updated_at = now() WHERE id = $1`,
     [row.id, profile.allocation.mode, String(profile.allocation.value), profile.leverage, profile.marginMode],
   );
+  notifyOwner(row, [`Размер сделки изменён: ${sizeText({ ...row, allocation_mode: profile.allocation.mode,
+    allocation_value: profile.allocation.value, leverage: profile.leverage, margin_mode: profile.marginMode } as Row)}.`]);
   res.json({
     positionSettings: {
       allocationMode: profile.allocation.mode, allocationValue: profile.allocation.value,
@@ -384,6 +422,8 @@ router.post("/me/account", async (req, res) => {
        real_key_verified_at = CASE WHEN $3 THEN COALESCE(real_key_verified_at, now()) ELSE real_key_verified_at END,
        version = version + 1, updated_at = now() WHERE id = $1`,
     [row.id, account, realVerified]);
+  notifyOwner(row, [`Счёт переключён: ${ACCOUNT_NAME(subscriberAccount(row))} → ${ACCOUNT_NAME(account)}.`,
+    "Торговля начнётся после «Старт»."]);
   res.json({ account });
 });
 
@@ -408,10 +448,18 @@ router.post("/me/trading", async (req, res) => {
       [row.id],
     );
   } else {
+    const account = subscriberAccount(row);
+    // Announced here (always, at once); the worker sees this state and does not repeat it.
     await pool.query(
-      "UPDATE subscribers SET trading_enabled = false, trading_stopped_at = now(), updated_at = now() WHERE id = $1",
-      [row.id],
+      `UPDATE subscribers SET trading_enabled = false, trading_stopped_at = now(), updated_at = now(),
+         trading_notice = $2 WHERE id = $1`,
+      [row.id, `${account}:off`],
     );
+    if (row.trading_enabled) {
+      const open = await openPositionsAnywhere(row.id);
+      notifyOwner(row, [`BingX ${account === "real" ? "REAL" : "VST"} · Нажат «Стоп»: торговля на ${account === "real" ? "РЕАЛЬНОМ счёте" : "демо-счёте"} остановлена.`,
+        open ? `Новые сделки не открываются; открытые (${open}) бот доведёт до закрытия.` : "Открытых сделок нет."]);
+    }
   }
   res.json({ tradingEnabled: enable });
 });
@@ -464,6 +512,8 @@ router.post("/journal/subscribers/:id/real", requireJournalSession, requireJourn
        updated_at = now() WHERE id = $1 RETURNING *`,
     [id, allowed]);
   if (!result.rowCount) return refuse(res, 404, "not_found", "Подписчик не найден");
+  notifyOwner(result.rows[0] as Row, [allowed ? "Владелец разрешил реальный счёт."
+    : "Владелец закрыл реальный счёт: новые реальные сделки не открываются, открытые доводятся до закрытия."]);
   res.json({ subscriber: publicView(result.rows[0] as Row) });
 });
 
@@ -501,6 +551,8 @@ router.post("/journal/subscribers/:id/decision", requireJournalSession, requireJ
     [id, status, getAuth(req).userId],
   );
   if (!result.rowCount) return refuse(res, 404, "not_found", "Подписчик не найден");
+  notifyOwner(result.rows[0] as Row, [{ approve: "Заявка одобрена.", reject: "Заявка отклонена.",
+    block: "Доступ заблокирован: торговля остановлена.", unblock: "Доступ снова открыт." }[decision as "approve"]]);
   res.json({ subscriber: publicView(result.rows[0] as Row) });
 });
 

@@ -201,7 +201,8 @@ export function createSubscriberTradingManager({
   const announced = new Map(); // id -> state
   async function announce(sub, account, state, lines) {
     const key = `${account}:${state}`;
-    if ((announced.get(sub.id) ?? sub.trading_notice) === key) return;
+    // The cabinet API records what it already announced (e.g. "Стоп").
+    if (sub.trading_notice === key || announced.get(sub.id) === key) return;
     announced.set(sub.id, key);
     try {
       await ownerPool.query("UPDATE subscribers SET trading_notice = $2 WHERE id = $1", [sub.id, key]);
