@@ -2,6 +2,9 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startBotWorker, stopBotWorker } from "./bullet-bot/bot-runtime.mjs";
 import { auditLiveFunding } from "./lib/live-funding-audit";
+import { pool } from "@workspace/db";
+// @ts-expect-error JavaScript module of the bot.
+import { ensureRuntimeTables } from "./bullet-bot/runtime-tables.mjs";
 
 const rawPort = process.env["PORT"];
 
@@ -24,6 +27,11 @@ const server = app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+});
+
+// Same tables in development and production (see runtime-tables.mjs).
+void ensureRuntimeTables(pool).catch((err: unknown) => {
+  logger.error({ err }, "Runtime tables could not be ensured");
 });
 
 void startBotWorker().catch((err: unknown) => {

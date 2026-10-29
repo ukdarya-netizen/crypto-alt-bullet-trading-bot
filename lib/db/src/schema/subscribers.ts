@@ -30,6 +30,16 @@ export const subscribersTable = pgTable("subscribers", {
   leverage: integer("leverage").notNull().default(10),
   /** ISOLATED | CROSSED */
   marginMode: text("margin_mode").notNull().default("ISOLATED"),
+  /** Strategy "patterns": exit choice and 1-3 chosen patterns ("a,b"). */
+  patternExit: text("pattern_exit"),
+  patterns: text("patterns"),
+  /** "vst" (demo) | "real" (real BingX account). */
+  tradingAccount: text("trading_account").notNull().default("vst"),
+  realAllowed: boolean("real_allowed").notNull().default(false),
+  realKeyVerifiedAt: timestamp("real_key_verified_at", { withTimezone: true }),
+  keyIsOwnerMain: boolean("key_is_owner_main").notNull().default(false),
+  /** Last trading state announced in Telegram ("real:on", ...). */
+  tradingNotice: text("trading_notice"),
   tradingEnabled: boolean("trading_enabled").notNull().default(false),
   /** Signals received before this instant are never traded for this subscriber. */
   tradingStartedAt: timestamp("trading_started_at", { withTimezone: true }),

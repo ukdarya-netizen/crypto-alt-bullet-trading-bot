@@ -248,6 +248,13 @@ export function createSubscriberTradingManager({
       key: decryptSecret(sub.api_key_encrypted),
       secret: decryptSecret(sub.api_secret_encrypted),
     });
+    // The owner's main bot trades the DEMO account of BINGX_API_KEY. Checked on
+    // the decrypted key itself (not a stored flag), so no lost column can
+    // ever put a second bot on that account.
+    const mainKey = String(configuration.BINGX_API_KEY ?? "").trim();
+    if (account === "vst" && mainKey && credentials.key.trim() === mainKey) {
+      throw new Error("owner_main_key_on_demo_account");
+    }
     // Re-checked on every start: a key that gained withdraw/transfer rights
     // after it was saved is never used.
     const { permissions } = await readBingXKeyPermissions(credentials);

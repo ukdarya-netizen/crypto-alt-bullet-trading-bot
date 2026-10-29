@@ -25,3 +25,4 @@ export * from "./bingx-real-test-selection";
 export * from "./historical-cascade-selection";
 export * from "./vst";
 export * from "./bot-health";export * from "./subscribers";
+export * from "./trading-strategies";

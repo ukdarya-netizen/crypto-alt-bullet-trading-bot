@@ -8,6 +8,14 @@ import {
   recordPaperFailure,
 } from "./lib/paper-executor";
 import { processPaperExits } from "./lib/paper-exits";
+// @ts-expect-error JavaScript module of the bot.
+import { ensureRuntimeTables } from "./bullet-bot/runtime-tables.mjs";
+
+// The development workflow runs only this worker: keep the development
+// database's bot-created tables identical to production (runtime-tables.mjs).
+void ensureRuntimeTables(pool).catch((err: unknown) => {
+  logger.error({ err }, "Runtime tables could not be ensured");
+});
 
 const pollIntervalMs = 1_500;
 const paperExitIntervalMs = 10_000;
